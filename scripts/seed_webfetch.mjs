@@ -22,6 +22,29 @@ function classify(name) {
   if (N.includes('ZIYUAN')) return { category: "imaging", subCategory: "optical", payloadType: "光学成像（资源调查）", desc: "资源系列陆地资源调查卫星。" };
   if (N.includes('TIANHUI')) return { category: "imaging", subCategory: "optical", payloadType: "光学成像（测绘）", desc: "天绘系列测绘卫星。" };
   if (N.includes('HAIYANG')) return { category: "science", subCategory: "oceanography", payloadType: "海洋遥感", desc: "海洋系列海洋水色/动力环境监测卫星。" };
+  if (N.includes('SDGSAT')) return { category: "science", subCategory: "remote_sensing", payloadType: "可持续发展科学遥感", desc: "可持续发展科学卫星1号。" };
+  if (/LANDSAT|TERRA|AQUA|AURA|ICESAT|SMAP|GRACE|SWARM|CRYOSAT|GCOM|OCO|SENTINEL-5|CASSIOPE|SHIJIAN|CYGFM/.test(N)) {
+    return { category: "science", subCategory: "earth_observation", payloadType: "对地观测科学载荷", desc: "对地观测科学卫星。" };
+  }
+  if (/SENTINEL|ALOS|ICEYE|GEOEYE|KOMPSAT|CARTOSAT|RESURS|OKEAN|WORLDVIEW|PLEIADES|TERRASAR|SPOT |RESURS/.test(N)) {
+    const sub = /SENTINEL-1|ALOS-2|ALOS-4|ICEYE|ROSESAT/.test(N) ? "sar" : "optical";
+    return { category: "imaging", subCategory: sub, payloadType: sub === "sar" ? "SAR雷达成像" : "光学成像", desc: "国际对地观测卫星。" };
+  }
+  if (/NOAA|METOP|GOES|METEOSAT|HIMAWARI|DMSP|JPSS|SUOMI|METEOR|ELEKTRO|INSAT|GPM|EWS-G|FENGYUN/.test(N)) {
+    return { category: "weather", subCategory: "meteorological", payloadType: "气象遥感", desc: "气象对地观测卫星。" };
+  }
+  if (/COSMOS 2535|COSMOS.*RECON/.test(N)) {
+    return { category: "recon", subCategory: "recon_imaging", payloadType: "成像侦察", desc: "俄罗斯 Cosmos 系列成像侦察卫星。" };
+  }
+  if (/COMS/.test(N)) {
+    return { category: "weather", subCategory: "meteorological", payloadType: "气象遥感", desc: "韩国通信海洋气象卫星。" };
+  }
+  if (/ARKTIKA/.test(N)) {
+    return { category: "weather", subCategory: "meteorological", payloadType: "气象遥感（北极监测）", desc: "俄罗斯北极气象监测卫星。" };
+  }
+  if (/KH-11|NROL|USA-224|USA-245|USA-290|RECON/.test(N)) {
+    return { category: "recon", subCategory: "recon_imaging", payloadType: "成像侦察", desc: "成像侦察卫星。" };
+  }
   return null;
 }
 
