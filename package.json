@@ -1,0 +1,26 @@
+{
+  "name": "satellite-mission-planning",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev:server": "node server/index.mjs",
+    "dev:client": "vite --strictPort",
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "seed": "node scripts/seed.mjs"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.8.2",
+    "better-sqlite3": "^13.0.3",
+    "express": "^5.3.0",
+    "satellite.js": "^7.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.2.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "three": "^0.187.0",
+    "vite": "^8.3.6"
+  }
+}

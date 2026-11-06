@@ -1,0 +1,11 @@
+/* 由 build_webfonts.py 生成。整个目录拷进项目后用相对路径 @import 即可。 */
+
+/* Space Grotesk —— 西文无衬线。CSS 里写 font-family: 'Space Grotesk' */
+
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('./space-grotesk.woff2') format('woff2');
+}

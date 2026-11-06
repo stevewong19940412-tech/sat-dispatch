@@ -1,0 +1,8 @@
+思源黑体（Noto Sans SC）
+
+(c) 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://scripts.sil.org/OFL
+
+同目录的 OFL.txt 是许可证全文。这份字体是子集化后的版本，
+随应用一起分发时，请把本文件和 OFL.txt 一起保留。

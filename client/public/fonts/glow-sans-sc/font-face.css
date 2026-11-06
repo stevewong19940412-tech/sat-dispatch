@@ -1,0 +1,19 @@
+/* 由 build_webfonts.py 生成。整个目录拷进项目后用相对路径 @import 即可。 */
+
+/* 未来荧黑 —— 现代黑体。CSS 里写 font-family: 'Glow Sans SC' */
+
+@font-face {
+  font-family: 'Glow Sans SC';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./glow-sans-sc-regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Glow Sans SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./glow-sans-sc-bold.woff2') format('woff2');
+}

@@ -1,0 +1,388 @@
+/* 遥感卫星任务规划系统 — 全局样式
+   设计方向：深空指挥台。深蓝黑底、遥感绿与警戒橙双主色、等宽数据字体。 */
+
+@import url("/fonts/glow-sans-sc/font-face.css");
+@import url("/fonts/space-grotesk/font-face.css");
+@import url("/fonts/ibm-plex-mono/font-face.css");
+@import url("/fonts/noto-sans-sc/font-face.css");
+
+:root {
+  --bg-deep: #060a14;
+  --bg-panel: rgba(10, 16, 30, 0.92);
+  --bg-panel-solid: #0a101e;
+  --border: rgba(56, 88, 140, 0.35);
+  --border-bright: rgba(96, 148, 220, 0.55);
+  --text-main: #c9d6ec;
+  --text-dim: #6f81a0;
+  --text-bright: #eef4ff;
+  --accent: #2dd4a7;         /* 遥感绿 */
+  --accent-dim: rgba(45, 212, 167, 0.15);
+  --warn: #f5a524;           /* 警戒橙 */
+  --danger: #f4525e;
+  --imaging: #10b981;
+  --recon: #ef4444;
+  --weather: #22d3ee;
+  --science: #84cc16;
+  --font-display: 'Glow Sans SC', 'Noto Sans SC', sans-serif;
+  --font-body: 'Noto Sans SC', sans-serif;
+  --font-west: 'Space Grotesk', 'Noto Sans SC', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #root { height: 100%; overflow: hidden; }
+
+body {
+  background: var(--bg-deep);
+  color: var(--text-main);
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+
+/* ─── 顶栏 ─────────────────────────────────────────── */
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0; height: 46px; z-index: 100;
+  display: flex; align-items: center; gap: 16px; padding: 0 16px;
+  background: linear-gradient(180deg, rgba(8,13,26,0.97), rgba(8,13,26,0.85));
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+}
+.topbar-brand {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-display); font-size: 16px; letter-spacing: 2px;
+  color: var(--text-bright);
+}
+.topbar-brand .sigil {
+  width: 22px; height: 22px; border: 1.5px solid var(--accent);
+  border-radius: 50%; position: relative; flex-shrink: 0;
+}
+.topbar-brand .sigil::before {
+  content: ''; position: absolute; inset: 4px;
+  border: 1px solid var(--accent-dim); border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, var(--accent), transparent 70%);
+}
+.topbar-stats {
+  display: flex; gap: 18px; font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-dim);
+}
+.topbar-stats b { color: var(--accent); font-weight: 500; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+.live-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--accent);
+  padding: 3px 10px; border: 1px solid rgba(45,212,167,0.4); border-radius: 3px;
+  cursor: pointer; user-select: none;
+}
+.live-badge .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  animation: pulse 1.6s infinite;
+}
+.live-badge.paused .dot { background: var(--warn); animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.clock {
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-main);
+  letter-spacing: 1px;
+}
+
+/* ─── 左侧控制面板 ──────────────────────────────────── */
+.left-panel {
+  position: fixed; top: 54px; left: 12px; bottom: 12px; width: 300px; z-index: 90;
+  display: flex; flex-direction: column; gap: 10px;
+  transition: transform 0.25s ease;
+}
+.left-panel.collapsed { transform: translateX(-290px); }
+.panel-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.panel-card-header {
+  padding: 8px 12px; font-family: var(--font-display); font-size: 12px;
+  letter-spacing: 2px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  user-select: none; cursor: default;
+}
+.panel-card-body { padding: 10px 12px; }
+
+/* 类别筛选 */
+.cat-row {
+  display: flex; align-items: center; gap: 8px; padding: 5px 6px;
+  border-radius: 4px; cursor: pointer; user-select: none; font-size: 12.5px;
+}
+.cat-row:hover { background: rgba(56,88,140,0.12); }
+.cat-row .swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+.cat-row .cnt { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+.cat-row.off { opacity: 0.35; }
+.cat-row.off .swatch { background: var(--text-dim) !important; }
+
+/* 搜索框 */
+.search-box {
+  width: 100%; padding: 7px 10px;
+  background: rgba(20,30,52,0.8); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text-bright); font-size: 12.5px;
+  font-family: var(--font-body);
+  outline: none;
+}
+.search-box:focus { border-color: var(--accent); }
+.search-box::placeholder { color: var(--text-dim); }
+
+.search-results { max-height: 260px; overflow-y: auto; margin-top: 6px; }
+.search-item {
+  padding: 6px 8px; border-radius: 3px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+}
+.search-item:hover { background: rgba(45,212,167,0.1); }
+.search-item .nid { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
+.search-item .cat-tag {
+  margin-left: auto; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+}
+
+/* 图层开关 */
+.layer-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 6px; font-size: 12px; cursor: pointer; user-select: none;
+  border-radius: 3px;
+}
+.layer-row:hover { background: rgba(56,88,140,0.12); }
+.toggle {
+  width: 26px; height: 14px; border-radius: 7px; background: rgba(56,88,140,0.4);
+  position: relative; transition: background 0.2s;
+}
+.toggle::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px;
+  border-radius: 50%; background: var(--text-dim); transition: all 0.2s;
+}
+.toggle.on { background: var(--accent-dim); }
+.toggle.on::after { left: 14px; background: var(--accent); }
+
+/* ─── 右侧详情面板 ──────────────────────────────────── */
+.right-panel {
+  position: fixed; top: 54px; right: 12px; bottom: 12px; width: 340px; z-index: 90;
+  display: flex; flex-direction: column; gap: 10px;
+  pointer-events: none;
+}
+.right-panel > * { pointer-events: auto; }
+.right-panel.hidden { display: none; }
+
+.detail-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  max-height: 100%;
+}
+.detail-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; gap: 10px;
+}
+.detail-header .sat-name {
+  font-family: var(--font-display); font-size: 15px; color: var(--text-bright);
+  letter-spacing: 1px;
+}
+.detail-header .sat-norad {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); margin-top: 2px;
+}
+.close-btn {
+  margin-left: auto; background: none; border: 1px solid var(--border);
+  color: var(--text-dim); width: 22px; height: 22px; border-radius: 4px;
+  cursor: pointer; font-size: 13px; line-height: 1;
+}
+.close-btn:hover { color: var(--danger); border-color: var(--danger); }
+
+.detail-tabs { display: flex; border-bottom: 1px solid var(--border); }
+.detail-tab {
+  flex: 1; padding: 7px 0; text-align: center; font-size: 12px;
+  color: var(--text-dim); cursor: pointer; user-select: none;
+  border-bottom: 2px solid transparent;
+}
+.detail-tab:hover { color: var(--text-main); }
+.detail-tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+
+.detail-body { padding: 12px 14px; overflow-y: auto; flex: 1; }
+
+.kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.kv { font-size: 12px; }
+.kv .k { color: var(--text-dim); font-size: 11px; margin-bottom: 2px; }
+.kv .v { font-family: var(--font-mono); color: var(--text-main); font-size: 12px; }
+.kv .v.big { font-size: 16px; color: var(--accent); }
+
+.section-label {
+  font-size: 11px; color: var(--text-dim); letter-spacing: 2px;
+  margin: 12px 0 6px; font-family: var(--font-display);
+}
+.section-label:first-child { margin-top: 0; }
+
+/* 过境列表 */
+.pass-item {
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px;
+  margin-bottom: 6px; font-size: 12px;
+}
+.pass-item .pass-time { font-family: var(--font-mono); color: var(--text-bright); font-size: 12px; }
+.pass-item .pass-meta { display: flex; gap: 12px; margin-top: 4px; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+.pass-item .maxel { color: var(--accent); }
+
+/* 观测点选择 */
+.obs-controls { display: flex; gap: 6px; margin-bottom: 8px; }
+.mini-input {
+  width: 100%; padding: 5px 8px; background: rgba(20,30,52,0.8);
+  border: 1px solid var(--border); border-radius: 3px; color: var(--text-bright);
+  font-family: var(--font-mono); font-size: 11.5px; outline: none;
+}
+.mini-input:focus { border-color: var(--accent); }
+
+.btn {
+  padding: 6px 14px; border-radius: 4px; border: 1px solid var(--border);
+  background: rgba(45,212,167,0.12); color: var(--accent);
+  font-size: 12px; font-family: var(--font-body); cursor: pointer;
+  letter-spacing: 1px;
+}
+.btn:hover { background: rgba(45,212,167,0.22); }
+.btn.secondary { background: rgba(56,88,140,0.15); color: var(--text-main); }
+.btn.secondary:hover { background: rgba(56,88,140,0.3); }
+.btn.danger { background: rgba(244,82,94,0.12); color: var(--danger); border-color: rgba(244,82,94,0.4); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-row { display: flex; gap: 8px; margin-top: 8px; }
+
+/* AOI 面板 */
+.aoi-hint { font-size: 11.5px; color: var(--text-dim); line-height: 1.6; margin-bottom: 8px; }
+.aoi-mode-btn { width: 100%; margin-bottom: 8px; }
+.aoi-mode-btn.on { background: rgba(245,165,36,0.18); color: var(--warn); border-color: rgba(245,165,36,0.5); }
+
+/* ─── 任务面板（底部抽屉） ───────────────────────────── */
+.missions-drawer {
+  position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 95;
+  background: var(--bg-panel); border: 1px solid var(--border-bright);
+  border-radius: 6px; max-height: 46vh; display: flex; flex-direction: column;
+  transition: transform 0.25s ease;
+}
+.missions-drawer.minimized { transform: translateY(calc(100% - 42px)); }
+.missions-drawer-header {
+  padding: 10px 16px; display: flex; align-items: center; gap: 14px;
+  border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+}
+.missions-drawer-header .title {
+  font-family: var(--font-display); font-size: 13px; letter-spacing: 2px; color: var(--text-bright);
+}
+.missions-drawer-body { padding: 12px 16px; overflow-y: auto; flex: 1; }
+
+.mission-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.mission-table th {
+  text-align: left; padding: 6px 10px; color: var(--text-dim); font-weight: normal;
+  font-size: 11px; border-bottom: 1px solid var(--border); letter-spacing: 1px;
+}
+.mission-table td { padding: 7px 10px; border-bottom: 1px solid rgba(56,88,140,0.15); font-family: var(--font-body); }
+.mission-table tr:hover td { background: rgba(56,88,140,0.08); cursor: pointer; }
+
+.status-pill {
+  display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 11px;
+}
+.status-planning { background: rgba(245,165,36,0.15); color: var(--warn); }
+.status-active { background: rgba(45,212,167,0.15); color: var(--accent); }
+.status-paused { background: rgba(111,129,160,0.2); color: var(--text-dim); }
+.status-completed { background: rgba(34,211,238,0.15); color: var(--weather); }
+.status-archived { background: rgba(111,129,160,0.12); color: var(--text-dim); opacity: 0.7; }
+
+.priority-critical { color: var(--danger); font-weight: 600; }
+.priority-high { color: var(--warn); }
+.priority-medium { color: var(--text-main); }
+.priority-low { color: var(--text-dim); }
+
+/* 任务表单弹层 */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(3,6,14,0.75); z-index: 200;
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px);
+}
+.modal {
+  background: var(--bg-panel-solid); border: 1px solid var(--border-bright);
+  border-radius: 8px; width: 560px; max-height: 86vh; display: flex; flex-direction: column;
+}
+.modal-header {
+  padding: 14px 20px; border-bottom: 1px solid var(--border);
+  font-family: var(--font-display); font-size: 15px; letter-spacing: 2px;
+  color: var(--text-bright); display: flex; align-items: center;
+}
+.modal-body { padding: 16px 20px; overflow-y: auto; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-field { display: flex; flex-direction: column; gap: 4px; }
+.form-field.full { grid-column: 1 / -1; }
+.form-field label { font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
+.form-field input, .form-field select, .form-field textarea {
+  padding: 7px 10px; background: rgba(20,30,52,0.8); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text-bright); font-size: 12.5px; font-family: var(--font-body);
+  outline: none;
+}
+.form-field input:focus, .form-field select:focus, .form-field textarea:focus { border-color: var(--accent); }
+.form-field textarea { resize: vertical; min-height: 54px; }
+.form-error { color: var(--danger); font-size: 11.5px; margin-top: 8px; }
+
+/* 卫星多选列表 */
+.sat-select-list {
+  max-height: 180px; overflow-y: auto; border: 1px solid var(--border);
+  border-radius: 4px; margin-top: 4px;
+}
+.sat-select-item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+  font-size: 12px; cursor: pointer;
+}
+.sat-select-item:hover { background: rgba(56,88,140,0.12); }
+.sat-select-item .swatch { width: 8px; height: 8px; border-radius: 2px; }
+.sat-select-item .nid { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
+.sat-select-item.selected { background: rgba(45,212,167,0.12); }
+.sat-check { width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; }
+.sat-select-item.selected .sat-check { background: var(--accent); color: var(--bg-deep); border-color: var(--accent); }
+
+/* ─── 态势提示 ──────────────────────────────────────── */
+.hud-bottom {
+  position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 60; display: flex; gap: 10px; pointer-events: none;
+}
+.hud-chip {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 4px; padding: 6px 14px; font-family: var(--font-mono);
+  font-size: 11px; color: var(--text-dim);
+}
+.hud-chip b { color: var(--text-main); font-weight: 500; }
+
+.cursor-coords {
+  position: fixed; bottom: 54px; left: 50%; transform: translateX(-50%);
+  z-index: 60; font-family: var(--font-mono); font-size: 11px;
+  color: var(--accent); pointer-events: none; letter-spacing: 1px;
+}
+
+.aoi-banner {
+  position: fixed; top: 54px; left: 50%; transform: translateX(-50%);
+  z-index: 85; padding: 8px 20px; border-radius: 4px;
+  background: rgba(245,165,36,0.14); border: 1px solid rgba(245,165,36,0.5);
+  color: var(--warn); font-size: 12.5px; letter-spacing: 1px;
+}
+
+/* 面板折叠按钮 */
+.panel-toggle {
+  position: fixed; top: 54px; left: 12px; z-index: 91;
+  width: 28px; height: 28px; border-radius: 4px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  color: var(--text-dim); cursor: pointer; font-size: 13px;
+  display: flex; align-items: center; justify-content: center;
+}
+.panel-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.left-panel:not(.collapsed) ~ .panel-toggle { left: 320px; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(56,88,140,0.4); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(96,148,220,0.6); }
+
+/* 星历龄期徽标 */
+.tle-age { font-family: var(--font-mono); font-size: 10.5px; padding: 1px 8px; border-radius: 8px; }
+.tle-age.fresh { background: rgba(45,212,167,0.12); color: var(--accent); }
+.tle-age.stale { background: rgba(245,165,36,0.12); color: var(--warn); }
+.tle-age.old { background: rgba(244,82,94,0.12); color: var(--danger); }
