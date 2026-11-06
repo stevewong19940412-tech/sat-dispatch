@@ -141,7 +141,7 @@ app.use("/api", api);
 // ─── 静态文件（构建产物） ─────────────────────────────────────────────────
 const distDir = join(__dirname, "..", "client", "dist");
 app.use(express.static(distDir));
-app.get("*", (req, res, next) => {
+app.get("/*any", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
   res.sendFile(join(distDir, "index.html"));
 });
