@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>遥感卫星任务规划底座 · 需求草案 v2</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK SC","Microsoft YaHei",sans-serif; background: #0b1020; color: #dbe4ff; padding: 40px 24px; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .badge { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge-draft { background: rgba(245,158,11,.15); color: #f59e0b; border: 1px solid rgba(245,158,11,.4); }
+  h1 { font-size: 22px; margin: 14px 0 6px; color: #fff; }
+  .summary { color: #8fa3c8; font-size: 14px; line-height: 1.7; margin-bottom: 28px; }
+  .card { background: #131a2e; border: 1px solid #25304d; border-radius: 10px; padding: 20px 22px; margin-bottom: 18px; }
+  .card h2 { font-size: 15px; color: #7dd3fc; margin-bottom: 12px; }
+  .card p, .card li { font-size: 13px; line-height: 1.8; color: #b8c4dd; }
+  ul { padding-left: 20px; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill { padding: 5px 12px; border-radius: 14px; font-size: 12px; background: #1a2340; border: 1px solid #2c3858; color: #a5b4fc; }
+  .pill.off { color: #94a3b8; border-style: dashed; text-decoration: line-through; text-decoration-color: rgba(148,163,184,.5); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #25304d; }
+  th { color: #7dd3fc; font-weight: 600; font-size: 12px; }
+  .tag-must { color: #f87171; font-weight: 600; }
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+  .fstep { background: #1a2340; border: 1px solid #2c3858; border-radius: 8px; padding: 7px 12px; font-size: 12px; color: #c7d2fe; }
+  .farrow { color: #4c5c86; font-size: 14px; }
+  .decision { background: rgba(245,158,11,.07); border: 1px dashed rgba(245,158,11,.45); border-radius: 8px; padding: 10px 14px; margin-top: 8px; }
+  .decision b { color: #f59e0b; }
+  .num { font-size: 26px; font-weight: 700; color: #4ade80; }
+  .numlabel { font-size: 12px; color: #8fa3c8; }
+  .statrow { display: flex; gap: 28px; margin: 6px 0 4px; }
+  .risk { background: rgba(239,68,68,.07); border: 1px dashed rgba(239,68,68,.4); border-radius: 8px; padding: 10px 14px; margin-top: 8px; }
+  .risk b { color: #f87171; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="badge badge-draft">需求草案 v2 · 待确认</span>
+  <h1>遥感卫星任务规划底座（迁移 + 收敛）</h1>
+  <p class="summary">把「全球开源情报工作台」卫星能力独立迁移，并按新定位收敛：只保留遥感卫星、补齐遥感卫星数量，面向遥感卫星做任务规划。情报流/监视面板直接移除（D-1），火点/风场改内置静态示例（D-2）。</p>
+
+  <div class="card">
+    <h2>遥感卫星底数（已盘点）</h2>
+    <div class="statrow">
+      <div><span class="num">~96</span> <span class="numlabel">原库遥感相关</span></div>
+      <div><span class="num">150~200</span> <span class="numlabel">目标规模（含补充）</span></div>
+      <div><span class="num">345</span> <span class="numlabel">非遥感卫星（剥离）</span></div>
+    </div>
+    <table>
+      <tr><th>来源类别</th><th>数量</th><th>遥感界定</th></tr>
+      <tr><td>地球观测 eo</td><td>13</td><td>全部保留（WorldView/Pleiades/Sentinel/TerraSAR/ALOS/ICEYE）</td></tr>
+      <tr><td>侦察 reconnaissance</td><td>15</td><td>约 9 颗成像侦察保留（KH-11/NROL/YAOGAN）；WGS/AEHF 通信星剥离</td></tr>
+      <tr><td>气象 weather</td><td>54</td><td>全部保留（风云/NOAA/METOP/GOES/Himawari）</td></tr>
+      <tr><td>科学 science</td><td>51</td><td>约 20 颗对地观测保留（Landsat/Terra/Aqua/Sentinel-3）；天文星剥离</td></tr>
+      <tr><td>星链/北斗/GPS 等</td><td>345</td><td>全部剥离</td></tr>
+    </table>
+    <p style="margin-top:8px"><b style="color:#fbbf24">拟补充</b>：高分系列（GF-1~7/多模/SAR）、遥感 YAOGAN 系列、高景 SuperView、吉林一号、资源、天绘，及 Radarsat-2/Cartosat/Capella 等国际商业遥感星。</p>
+  </div>
+
+  <div class="card">
+    <h2>核心流程</h2>
+    <div class="flow">
+      <span class="fstep">三维遥感星座态势</span><span class="farrow">→</span>
+      <span class="fstep">筛选/搜索</span><span class="farrow">→</span>
+      <span class="fstep">卫星档案（载荷/轨道）</span><span class="farrow">→</span>
+      <span class="fstep">过境预报</span><span class="farrow">→</span>
+      <span class="fstep">圈定 AOI</span><span class="farrow">→</span>
+      <span class="fstep">成像任务·指派卫星</span><span class="farrow">→</span>
+      <span class="fstep">任务跟踪</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>首版范围与剥离</h2>
+    <div class="pill-row">
+      <span class="pill">三维遥感态势</span>
+      <span class="pill">遥感星历库（96+补充）</span>
+      <span class="pill">卫星档案</span>
+      <span class="pill">过境预报 SGP4</span>
+      <span class="pill">火点/风场·静态示例</span>
+      <span class="pill">AOI</span>
+      <span class="pill">成像任务管理</span>
+      <span class="pill off">非遥感星座（345颗）</span>
+      <span class="pill off">情报流/监视面板</span>
+      <span class="pill off">新闻采集/SIGINT/设施库</span>
+      <span class="pill off">AI 助手面板</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>用户故事与验收追踪</h2>
+    <table>
+      <tr><th>编号</th><th>能力</th><th>优先级</th><th>验收标准</th><th>状态</th></tr>
+      <tr><td>US-01</td><td>遥感星座态势</td><td class="tag-must">必做</td><td>AC-01-01/02 分组着色+无非遥感残留</td><td>待验收</td></tr>
+      <tr><td>US-02</td><td>筛选搜索</td><td class="tag-must">必做</td><td>AC-02-01 搜「高分」聚焦+档案</td><td>待验收</td></tr>
+      <tr><td>US-03</td><td>卫星档案</td><td class="tag-must">必做</td><td>AC-03-01 载荷/轨道参数，缺项空态</td><td>待验收</td></tr>
+      <tr><td>US-04</td><td>过境预报</td><td class="tag-must">必做</td><td>AC-04-01/02 24h窗口+仰角联动</td><td>待验收</td></tr>
+      <tr><td>US-05</td><td>AOI+任务创建</td><td class="tag-must">必做</td><td>AC-05-01 建 AOI+指派卫星保存</td><td>待验收</td></tr>
+      <tr><td>US-06</td><td>任务跟踪</td><td class="tag-must">必做</td><td>AC-06-01 状态持久+过境统计</td><td>待验收</td></tr>
+      <tr><td>US-07</td><td>遥感底数完整</td><td class="tag-must">必做</td><td>AC-07-01/02 ≥150颗+高分/吉林一号入库+TLE真实</td><td>待验收</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>待你确认的 2 个口径</h2>
+    <div class="decision"><b>Q-1 遥感范围口径</b>：光学/SAR 成像 + 成像侦察 + 气象对地观测 + 对地观测科学星，共 4 类全保留——口径对吗？还是只留光学/SAR 成像星？</div>
+    <div class="decision"><b>Q-2 补充方式</b>：通过平台联网通道抓取 CelesTrak 等源的真实 TLE 补齐中国遥感系列，抓不到的标「星历待补」不编造——可以吗？</div>
+    <div class="risk"><b>风险提示</b>：Orbit.tsx 4391 行与情报模块代码耦合，小步拆解；地球贴图外网 CDN 需本地化；原库星历 2026-08 历元，预报误差随龄期增大。</div>
+  </div>
+</div>
+</body>
+</html>
