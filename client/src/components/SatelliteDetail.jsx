@@ -91,13 +91,13 @@ function DossierTab({ sat, meta }) {
         <div className="kv"><div className="k">数据来源</div><div className="v">{sat.source === "celestrak" ? "CelesTrak 实抓" : sat.source ?? "—"}</div></div>
       </div>
 
-      <div className="section-label">两行星历（TLE）</div>
+      <div className="section-label">轨道根数（历元数据）</div>
       <div style={{
         fontFamily: "var(--font-mono)", fontSize: 10.5, lineHeight: 1.6,
         background: "rgba(20,30,52,0.6)", padding: "8px 10px", borderRadius: 4,
         color: "var(--text-dim)", wordBreak: "break-all",
       }}>
-        {sat.tle1}<br />{sat.tle2}
+        {sat.tle1 && sat.tle1.length > 40 ? <>TLE: {sat.tle1}<br />{sat.tle2}</> : <>数据源: CelesTrak OMM（SGP4 直接传播）<br />历元: {sat.epoch?.slice(0, 19)?.replace("T", " ")} UTC</>}
       </div>
     </>
   );

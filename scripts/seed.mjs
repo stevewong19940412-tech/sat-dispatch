@@ -130,7 +130,7 @@ function main() {
 
     // 计算轨道参数
     const period = 1440 / (gp.MEAN_MOTION ?? 14);
-    const a = 8978.14 / Math.pow(gp.MEAN_MOTION / 227.9, 2 / 3); // 半长轴近似
+    const a = Math.pow(398600.4418 / Math.pow(gp.MEAN_MOTION * 2 * Math.PI / 86400, 2), 1 / 3); // 半长轴 μ/n² 三次方根
     const altitude = a - 6371;
 
     upsertSatellite({
