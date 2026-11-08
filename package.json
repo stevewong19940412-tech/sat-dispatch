@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@blade-hq/agent-client": "1.1.1",
-    "@blade-hq/agent-react": "file:/root/项目/全球开源情报工作台/redroom-osint-workbench/vendor/blade-hq-agent-react.tgz",
+    "@blade-hq/agent-react": "1.1.1",
     "@react-three/fiber": "^9.8.2",
     "better-sqlite3": "^13.0.3",
     "express": "^5.3.0",
