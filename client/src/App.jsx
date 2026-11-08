@@ -8,6 +8,7 @@ import {
 import SatelliteDetail from "./components/SatelliteDetail.jsx";
 import MissionsDrawer from "./components/MissionsDrawer.jsx";
 import MissionForm from "./components/MissionForm.jsx";
+import DispatchWorkbench from "./pages/DispatchWorkbench.jsx";
 
 export default function App() {
   const containerRef = useRef(null);
@@ -49,6 +50,8 @@ export default function App() {
 
   // 鼠标地理坐标
   const [cursorGeo, setCursorGeo] = useState(null);
+  // 调度工作台
+  const [workbench, setWorkbench] = useState(false);
 
   const groupColors = useMemo(() => {
     const m = {};
@@ -259,6 +262,10 @@ export default function App() {
             onClick={() => { setMissionsOpen(true); setMissionsMinimized(false); }}>
             任务管理
           </button>
+          <button className="btn secondary" style={{ padding: "4px 12px", borderColor: "var(--accent)", color: "var(--accent)" }}
+            onClick={() => setWorkbench(true)}>
+            调度工作台
+          </button>
           <button className="btn" style={{ padding: "4px 12px" }}
             onClick={() => { setEditingMission(null); setShowMissionForm(true); }}>
             + 新建任务
@@ -431,6 +438,7 @@ export default function App() {
           onSaved={missionSaved}
         />
       )}
+      {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
     </>
   );
 }
