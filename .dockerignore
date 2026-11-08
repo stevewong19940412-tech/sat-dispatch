@@ -1,0 +1,13 @@
+.git
+node_modules
+deploy
+client/src
+client/public
+docs
+drizzle
+scripts
+*.log
+screenshot.png
+*.md
+data/webfetch_raw
+data/*.json

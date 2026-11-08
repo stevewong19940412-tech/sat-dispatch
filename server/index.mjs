@@ -10,6 +10,7 @@ import { propagate, groundTrack, predictPasses, tleAgeDays } from "./orbit.mjs";
 import { dispatchApi } from "./dispatch.mjs";
 import "./dispatch_schema.mjs";
 import { fileURLToPath } from "url";
+import { existsSync } from "fs";
 import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -181,7 +182,10 @@ app.use("/api", api);
 app.use("/api/dispatch", dispatchApi);
 
 // ─── 静态文件（构建产物） ─────────────────────────────────────────────────
-const distDir = join(__dirname, "..", "client", "dist");
+// 部署态：client-dist 平铺在 runtime 根；开发态：../client/dist
+const distDir = existsSync(join(__dirname, "..", "client-dist"))
+  ? join(__dirname, "..", "client-dist")
+  : join(__dirname, "..", "client", "dist");
 app.use(express.static(distDir));
 app.get("/*any", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
