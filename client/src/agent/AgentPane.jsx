@@ -146,11 +146,22 @@ export function AgentPane({ visible, onClose, getContext }) {
       setModels(models);
       const model = selectedModel || catalog.defaultServiceModel;
       setSelectedModel(model);
-      const created = await client.sessions.create({
-        solution: { role: "dispatch-agent", files: solutionFiles },
-        skills: [{ name: "my/dispatch-ops", files: skillFiles }],
-        config: { model },
-      });
+      // Solution/Skill 首次上传较慢，超时自动重试一次
+      let created;
+      try {
+        created = await client.sessions.create({
+          solution: { role: "dispatch-agent", files: solutionFiles },
+          skills: [{ name: "my/dispatch-ops", files: skillFiles }],
+          config: { model },
+        });
+      } catch (e1) {
+        setConnectError("首次连接超时，正在重试…");
+        created = await client.sessions.create({
+          solution: { role: "dispatch-agent", files: solutionFiles },
+          skills: [{ name: "my/dispatch-ops", files: skillFiles }],
+          config: { model },
+        });
+      }
       setSession(null);
       setSessionId(created.sessionId);
       setConnected(true);
@@ -207,7 +218,7 @@ export function AgentPane({ visible, onClose, getContext }) {
   if (!visible) return null;
 
   return (
-    <>
+    <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 350, display: "flex" }}>
       <div className="blade-resizer" onPointerDown={startResize} onDoubleClick={() => setChatWidth(400)}
         role="separator" aria-orientation="vertical" tabIndex={0} />
       <div style={{
@@ -265,7 +276,7 @@ export function AgentPane({ visible, onClose, getContext }) {
         {showSettings && <SettingsModal models={models} selectedModel={selectedModel}
           onSelectModel={setSelectedModel} onClose={() => setShowSettings(false)} />}
       </div>
-    </>
+    </div>
   );
 }
 
