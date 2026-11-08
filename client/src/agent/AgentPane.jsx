@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { BladeClient } from "@blade-hq/agent-client";
 import { BladeProvider, ChatView } from "@blade-hq/agent-react";
-import "@blade-hq/agent-react/style.css";
+import "./blade-chat-full.css";
 import cliPyRaw from "./dispatch_cli.py?raw";
 import skillMdRaw from "./skill_dispatch_ops.md?raw";
 import roleMdRaw from "./role_prompt.md?raw";
@@ -258,9 +258,8 @@ export function AgentPane({ visible, onClose, getContext }) {
               {connectError && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 10 }}>{connectError}</div>}
             </div>
           ) : sessionId ? (
-            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-              <ChatView key={sessionId} sessionId={sessionId} onSessionReady={onSessionReady} theme="dark"
-                style={{ flex: 1, minHeight: 0 }} />
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+              <ChatView key={sessionId} sessionId={sessionId} onSessionReady={onSessionReady} theme="dark" />
             </div>
           ) : null}
         </div>
