@@ -4,6 +4,9 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { BladeClient } from "@blade-hq/agent-client";
 import { BladeProvider, ChatView } from "@blade-hq/agent-react";
 import "@blade-hq/agent-react/style.css";
+import cliPy from "./dispatch_cli.py?raw";
+import skillMd from "./skill_dispatch_ops.md?raw";
+import roleMd from "./role_prompt.md?raw";
 
 const BA_URL = "https://agent.bladeai.com.cn";
 const BA_URL_KEY = "blade-app:sat-dispatch:ba-url";
@@ -68,22 +71,7 @@ initial_mode: executing
 - 回答用业务语言，紧凑不啰嗦。` },
 ];
 
-const skillFiles = [{ path: "SKILL.md", content: `---
-name: dispatch-ops
-description: 查询与操作遥感卫星调度系统时使用。
----
-# 调度系统操作
-
-业务 CLI 是 \`dispatch\`（已随会话安装）。常用命令：
-
-- \`dispatch tasks --json\` 列任务；\`dispatch task <id>\` 看详情
-- \`dispatch create '<JSON>'\` 创建任务单（见角色提示的字段说明）
-- \`dispatch candidates <id>\` 候选计算（耗时 10~60 秒，告知用户稍等）
-- \`dispatch dispatch <id>\` 派单分流
-- \`dispatch sats <关键词>\` 查卫星；\`dispatch companies\` 查公司履约
-
-注意：CLI 输出均为 JSON，直接解析字段汇报，不要原文粘贴大 JSON。
-API 地址已内置，无需配置。` }];
+const skillFiles = [{ path: "SKILL.md", content: skillMd }, { path: "dispatch_cli.py", content: cliPy }];
 
 export const loaded = loadBaUrl();
 export const baUrl = loaded.value;
@@ -118,25 +106,9 @@ export function AgentPane({ visible, onClose, getContext }) {
 
   // attachApp：业务 CLI + 页面上下文
   const attach = useCallback(async (sess) => {
+    // SDK 1.1.1 无 attachApp；dispatch CLI 随 skill 文件下发，skill 正文指导用法
     if (!sess) return;
-    for (let i = 0; i < 3; i++) {
-      try {
-        await sess.attachApp({
-          cli: {
-            command: "dispatch",
-            runtime: "python",
-            source: new URL("/agent/dispatch_cli.py", location.href),
-          },
-          getContext: () => contextRef.current?.() ?? {},
-        });
-        setAttachError("");
-        return;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setAttachError(`业务命令通道安装失败（第${i+1}次）: ${msg}`);
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    }
+    setAttachError("");
   }, []);
 
   const start = async () => {
