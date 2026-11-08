@@ -7,6 +7,8 @@ import {
   updateMission, deleteMission, getStaticLayer, setStaticLayer,
 } from "./db.mjs";
 import { propagate, groundTrack, predictPasses, tleAgeDays } from "./orbit.mjs";
+import { dispatchApi } from "./dispatch.mjs";
+import "./dispatch_schema.mjs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
@@ -137,6 +139,7 @@ api.post("/layers/:type", (req, res) => {
 });
 
 app.use("/api", api);
+app.use("/api/dispatch", dispatchApi);
 
 // ─── 静态文件（构建产物） ─────────────────────────────────────────────────
 const distDir = join(__dirname, "..", "client", "dist");
