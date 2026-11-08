@@ -122,13 +122,18 @@ export function AgentPane({ visible, onClose, getContext }) {
     try {
       if (!client.hasToken()) await client.auth.login();
       // SDK 1.1.1 无 models 接口，直接走模型目录端点（serviceModelId 才是网关模型名）
-      const catalogRes = await client.fetch("GET", "/api/config/models");
-      const catalog = await catalogRes.json();
-      const models = (catalog.models ?? [])
-        .filter(m => m.serviceModelId)
-        .map(m => ({ id: m.serviceModelId, label: m.label || m.serviceModelId }));
+      let models = [], model;
+      if (typeof client.models?.list === "function") {
+        const catalog = await client.models.list();
+        models = catalog.models ?? [];
+        model = selectedModel || catalog.default;
+      } else {
+        const catalogRes = await client.fetch("GET", "/api/config/models");
+        const catalog = await catalogRes.json();
+        models = (catalog.models ?? []).filter(m => m.serviceModelId).map(m => ({ id: m.serviceModelId, label: m.label || m.serviceModelId }));
+        model = selectedModel || catalog.defaultServiceModel;
+      }
       setModels(models);
-      const model = selectedModel || catalog.defaultServiceModel;
       setSelectedModel(model);
       // Solution/Skill 首次上传较慢，超时自动重试一次
       let created;
