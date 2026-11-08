@@ -137,9 +137,14 @@ export function AgentPane({ visible, onClose, getContext }) {
     setConnecting(true); setConnectError("");
     try {
       if (!client.hasToken()) await client.auth.login();
-      const catalog = await client.models.list();
-      setModels(catalog.models);
-      const model = selectedModel || catalog.default;
+      // SDK 1.1.1 无 models 接口，直接走模型目录端点（serviceModelId 才是网关模型名）
+      const catalogRes = await client.fetch("GET", "/api/config/models");
+      const catalog = await catalogRes.json();
+      const models = (catalog.models ?? [])
+        .filter(m => m.serviceModelId)
+        .map(m => ({ id: m.serviceModelId, label: m.label || m.serviceModelId }));
+      setModels(models);
+      const model = selectedModel || catalog.defaultServiceModel;
       setSelectedModel(model);
       const created = await client.sessions.create({
         solution: { role: "dispatch-agent", files: solutionFiles },
@@ -150,6 +155,7 @@ export function AgentPane({ visible, onClose, getContext }) {
       setSessionId(created.sessionId);
       setConnected(true);
     } catch (e) {
+      console.error('连接失败:', e);
       setConnectError(e instanceof Error ? e.message : String(e));
     }
     setConnecting(false);
