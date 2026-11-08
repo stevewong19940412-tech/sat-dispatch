@@ -101,6 +101,7 @@ export function AgentPane({ visible, onClose, getContext }) {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState("");
+  const [attachError, setAttachError] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState([]);
@@ -118,17 +119,23 @@ export function AgentPane({ visible, onClose, getContext }) {
   // attachApp：业务 CLI + 页面上下文
   const attach = useCallback(async (sess) => {
     if (!sess) return;
-    try {
-      await sess.attachApp({
-        cli: {
-          command: "dispatch",
-          runtime: "python",
-          source: new URL("/agent/dispatch_cli.py", location.href),
-        },
-        getContext: () => contextRef.current?.() ?? {},
-      });
-    } catch (e) {
-      console.warn("attachApp 失败:", e);
+    for (let i = 0; i < 3; i++) {
+      try {
+        await sess.attachApp({
+          cli: {
+            command: "dispatch",
+            runtime: "python",
+            source: new URL("/agent/dispatch_cli.py", location.href),
+          },
+          getContext: () => contextRef.current?.() ?? {},
+        });
+        setAttachError("");
+        return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setAttachError(`业务命令通道安装失败（第${i+1}次）: ${msg}`);
+        await new Promise(r => setTimeout(r, 1500));
+      }
     }
   }, []);
 
@@ -232,6 +239,12 @@ export function AgentPane({ visible, onClose, getContext }) {
           <button className="agent-tool-btn" title="设置" onClick={() => setShowSettings(true)}>⚙</button>
           <button className="agent-tool-btn" title="收起" onClick={onClose}>✕</button>
         </div>
+
+        {attachError && (
+          <div style={{ padding: "6px 12px", fontSize: 11.5, color: "#dc2626", background: "#fef2f2", borderBottom: "1px solid #fecaca" }}>
+            {attachError}
+          </div>
+        )}
 
         {/* 会话菜单浮层 */}
         {showHistory && (
