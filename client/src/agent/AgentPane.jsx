@@ -205,16 +205,16 @@ export function AgentPane({ visible, onClose, getContext }) {
     <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 350, display: "flex" }}>
       <div className="blade-resizer" onPointerDown={startResize} onDoubleClick={() => setChatWidth(400)}
         role="separator" aria-orientation="vertical" tabIndex={0} />
-      <div style={{
+      <div className="agent-pane" style={{
         flex: `0 0 ${chatWidth}px`, minWidth: 320, display: "flex", flexDirection: "column",
-        background: "#ffffff", borderLeft: "1px solid #e2e8f0", color: "#1e293b",
+        background: "#0d1322", borderLeft: "1px solid var(--border)", color: "#dbe4ff",
       }}>
         {/* 面板工具条 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid #e2e8f0" }}>
-          <button className="agent-tool-btn" title="会话菜单" onClick={() => { setShowHistory(!showHistory); }}>☰</button>
-          <span style={{ fontSize: 13, fontWeight: 600, flex: 1, textAlign: "center" }}>任务下单助手</span>
-          <button className="agent-tool-btn" title="设置" onClick={() => setShowSettings(true)}>⚙</button>
-          <button className="agent-tool-btn" title="收起" onClick={onClose}>✕</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
+          <button className="agent-tool-btn agent-tool-btn-dark" title="会话菜单" onClick={() => { setShowHistory(!showHistory); }}>☰</button>
+          <span style={{ fontSize: 13, fontWeight: 600, flex: 1, textAlign: "center", fontFamily: "var(--font-display)", letterSpacing: 1 }}>任务下单助手</span>
+          <button className="agent-tool-btn agent-tool-btn-dark" title="设置" onClick={() => setShowSettings(true)}>⚙</button>
+          <button className="agent-tool-btn agent-tool-btn-dark" title="收起" onClick={onClose}>✕</button>
         </div>
 
         {attachError && (
@@ -225,15 +225,15 @@ export function AgentPane({ visible, onClose, getContext }) {
 
         {/* 会话菜单浮层 */}
         {showHistory && (
-          <div style={{ position: "absolute", top: 44, width: chatWidth - 2, background: "#fff", border: "1px solid #e2e8f0",
-            borderRadius: 6, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 50, maxHeight: 400, overflowY: "auto" }}>
+          <div style={{ position: "absolute", top: 44, width: chatWidth - 2, background: "#101828", border: "1px solid var(--border)",
+            borderRadius: 6, boxShadow: "0 8px 24px rgba(0,0,0,0.5)", zIndex: 50, maxHeight: 400, overflowY: "auto" }}>
             <button className="agent-history-new" onClick={() => { setShowHistory(false); start(); }}>＋ 新建对话</button>
-            {history.length === 0 && <div style={{ padding: 12, fontSize: 12, color: "#94a3b8" }}>暂无历史对话</div>}
+            {history.length === 0 && <div style={{ padding: 12, fontSize: 12, color: "var(--text-dim)" }}>暂无历史对话</div>}
             {history.map(h => (
               <div key={h.id} className="agent-history-item" onClick={() => openHistory(h.id)}
-                style={{ background: h.id === sessionId ? "#f0fdf9" : undefined }}>
+                style={{ background: h.id === sessionId ? "rgba(45,212,167,0.1)" : undefined }}>
                 <div style={{ fontSize: 12.5 }}>{h.intent || "新对话"}</div>
-                <div style={{ fontSize: 10.5, color: "#94a3b8" }}>{h.created_at?.slice(0, 16)?.replace("T", " ")}</div>
+                <div style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{h.created_at?.slice(0, 16)?.replace("T", " ")}</div>
               </div>
             ))}
           </div>
@@ -248,17 +248,20 @@ export function AgentPane({ visible, onClose, getContext }) {
             </div>
           ) : !connected && !sessionId ? (
             <div style={{ padding: 24, textAlign: "center" }}>
-              <div style={{ fontSize: 14, marginBottom: 8, fontWeight: 600 }}>任务下单助手</div>
-              <div style={{ fontSize: 12.5, color: "#64748b", lineHeight: 1.8, marginBottom: 16 }}>
+              <div style={{ fontSize: 14, marginBottom: 8, fontWeight: 600, fontFamily: "var(--font-display)", letterSpacing: 1 }}>任务下单助手</div>
+              <div style={{ fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.8, marginBottom: 16 }}>
                 用自然语言描述观测需求，助手自动解析成标准任务单、跑候选计算并完成派单分流。
               </div>
               <button className="agent-primary-btn" onClick={start} disabled={connecting}>
                 {connecting ? "连接中…" : "连接 Blade Agent"}
               </button>
-              {connectError && <div style={{ color: "#dc2626", fontSize: 12, marginTop: 10 }}>{connectError}</div>}
+              {connectError && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 10 }}>{connectError}</div>}
             </div>
           ) : sessionId ? (
-            <ChatView key={sessionId} sessionId={sessionId} onSessionReady={onSessionReady} theme="light" />
+            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+              <ChatView key={sessionId} sessionId={sessionId} onSessionReady={onSessionReady} theme="dark"
+                style={{ flex: 1, minHeight: 0 }} />
+            </div>
           ) : null}
         </div>
 
@@ -275,7 +278,7 @@ function SettingsModal({ models, selectedModel, onSelectModel, onClose }) {
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 400,
       display: "flex", alignItems: "center", justifyContent: "center" }}
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ background: "#fff", borderRadius: 8, padding: 20, width: 380 }}>
+      <div style={{ background: "#101828", border: "1px solid var(--border)", borderRadius: 8, padding: 20, width: 380, color: "var(--text-main)" }}>
         <div style={{ fontWeight: 700, marginBottom: 16 }}>设置</div>
         <label style={{ fontSize: 12.5, display: "block", marginBottom: 6 }}>Blade Agent 服务地址</label>
         <input className="agent-input" defaultValue={baUrl} readOnly />

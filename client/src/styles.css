@@ -387,7 +387,37 @@ body {
 .tle-age.stale { background: rgba(245,165,36,0.12); color: var(--warn); }
 .tle-age.old { background: rgba(244,82,94,0.12); color: var(--danger); }
 
-/* ─── Blade Agent 对话面板（浅色区，组件自带浅色主题） ─── */
+/* ─── Blade Agent 对话面板（深色融合，ChatView theme=dark + CSS变量对齐业务配色） ─── */
+.agent-pane {
+  /* 覆盖聊天组件 CSS 变量：背景/前景/主色/边框对齐业务配色（HSL 三元组，不带 hsl()） */
+  --background: 222 47% 8%;
+  --foreground: 218 40% 88%;
+  --primary: 165 72% 50%;
+  --primary-foreground: 222 47% 8%;
+  --border: 222 35% 22%;
+  --muted: 222 30% 16%;
+  --muted-foreground: 218 25% 60%;
+  --accent: 165 72% 50%;
+  --card: 222 40% 11%;
+  --popover: 222 40% 11%;
+  --secondary: 222 30% 18%;
+  --secondary-foreground: 218 40% 88%;
+  --ring: 165 72% 50%;
+  --input: 222 35% 20%;
+  --destructive: 0 72% 58%;
+  /* 字体对齐业务栈 */
+  font-family: var(--font-body);
+}
+/* 聊天组件消息区字体统一 */
+.agent-pane [class*="blade-chat"],
+.agent-pane .blade-chat-root {
+  font-family: var(--font-body);
+}
+/* 滚动条兜底：消息流容器必须可滚 */
+.agent-pane [class*="scroll"] { scrollbar-width: thin; scrollbar-color: rgba(56,88,140,0.6) transparent; }
+.agent-pane ::-webkit-scrollbar { width: 6px; }
+.agent-pane ::-webkit-scrollbar-thumb { background: rgba(56,88,140,0.55); border-radius: 3px; }
+.agent-pane ::-webkit-scrollbar-track { background: transparent; }
 .blade-resizer {
   flex: 0 0 12px;
   cursor: col-resize;
@@ -407,25 +437,27 @@ body {
 }
 .blade-resizer:hover::after { opacity: 0.4; }
 .agent-tool-btn {
-  background: none; border: 1px solid #e2e8f0; border-radius: 5px;
-  width: 26px; height: 26px; cursor: pointer; font-size: 13px; color: #475569;
+  background: none; border: 1px solid var(--border); border-radius: 5px;
+  width: 26px; height: 26px; cursor: pointer; font-size: 13px; color: var(--text-dim);
   display: inline-flex; align-items: center; justify-content: center;
 }
-.agent-tool-btn:hover { background: #f1f5f9; }
+.agent-tool-btn:hover { background: rgba(56,88,140,0.2); color: var(--text-main); }
+.agent-tool-btn-dark { border-color: var(--border); color: var(--text-dim); }
 .agent-primary-btn {
-  background: #0d9488; color: #fff; border: none; border-radius: 6px;
-  padding: 8px 20px; font-size: 13px; cursor: pointer; font-weight: 500;
+  background: rgba(45,212,167,0.15); color: var(--accent); border: 1px solid rgba(45,212,167,0.45);
+  border-radius: 6px; padding: 8px 20px; font-size: 13px; cursor: pointer; font-weight: 500;
 }
-.agent-primary-btn:hover { background: #0f766e; }
+.agent-primary-btn:hover { background: rgba(45,212,167,0.28); }
 .agent-primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .agent-input {
-  width: 100%; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 5px;
+  width: 100%; padding: 7px 10px; background: rgba(20,30,52,0.8);
+  border: 1px solid var(--border); border-radius: 5px; color: var(--text-bright);
   font-size: 12.5px; outline: none; box-sizing: border-box;
 }
 .agent-history-new {
-  width: 100%; padding: 10px 14px; background: none; border: none; border-bottom: 1px solid #e2e8f0;
-  text-align: left; font-size: 13px; color: #0d9488; cursor: pointer; font-weight: 600;
+  width: 100%; padding: 10px 14px; background: none; border: none; border-bottom: 1px solid var(--border);
+  text-align: left; font-size: 13px; color: var(--accent); cursor: pointer; font-weight: 600;
 }
-.agent-history-new:hover { background: #f0fdf9; }
-.agent-history-item { padding: 8px 14px; cursor: pointer; border-bottom: 1px solid #f1f5f9; }
-.agent-history-item:hover { background: #f8fafc; }
+.agent-history-new:hover { background: rgba(45,212,167,0.08); }
+.agent-history-item { padding: 8px 14px; cursor: pointer; border-bottom: 1px solid var(--border); color: var(--text-main); }
+.agent-history-item:hover { background: rgba(56,88,140,0.15); }
