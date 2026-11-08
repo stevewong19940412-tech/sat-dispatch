@@ -24,5 +24,14 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, "client/dist"),
     chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/three") || id.includes("node_modules/.pnpm/three")) return "three";
+          if (id.includes("node_modules/@blade-hq")) return "agent";
+          if (id.includes("node_modules/react") || id.includes("node_modules/scheduler")) return "reactvendor";
+        },
+      },
+    },
   },
 });

@@ -116,9 +116,11 @@ export function createScene(container) {
 
   // ─── 渲染循环 ───
   let animFrame = 0;
+  let paused = false;
   const clock = new THREE.Clock();
   const renderLoop = () => {
     animFrame = requestAnimationFrame(renderLoop);
+    if (paused) return; // 暂停时保留循环但跳过渲染，恢复即续
     controls.update();
     renderer.render(scene, camera);
   };
@@ -183,6 +185,8 @@ export function createScene(container) {
     satGroup, trackGroup, aoiGroup, layerGroup,
     pick, pickGlobe, resize, dispose,
     latLonAltToVec,
+    pause: () => { paused = true; },
+    resume: () => { paused = false; },
   };
 }
 

@@ -105,11 +105,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isLive) return;
+    if (!isLive || workbench) return; // 工作台全屏打开时暂停三维态势轮询，让出主线程与带宽
     fetchPositions();
     const t = setInterval(fetchPositions, 5000);
     return () => clearInterval(t);
-  }, [isLive, fetchPositions]);
+  }, [isLive, workbench, fetchPositions]);
 
   // 时钟
   useEffect(() => {
@@ -117,9 +117,21 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // 工作台全屏打开时暂停三维渲染，关闭时恢复
+  useEffect(() => {
+    const s3d = scene3dRef.current;
+    if (!s3d) return;
+    if (workbench) s3d.pause(); else s3d.resume();
+  }, [workbench, sceneReady]);
+
   // ─── 位置更新到三维 ───
+  const lastPositionsSig = useRef('');
   useEffect(() => {
     if (!satLayerRef.current) return;
+    // 引用签名去重：轮询返回内容相同时跳过整场景更新
+    const sig = positions.length + ':' + (positions[0]?.noradId ?? '') + ':' + Math.round(positions[0]?.lat ?? 0);
+    if (sig === lastPositionsSig.current) return;
+    lastPositionsSig.current = sig;
     const visible = positions.filter(s => enabledCats.has(s.category));
     satLayerRef.current.updatePositions(visible);
     if (selectedSat) satLayerRef.current.highlight(selectedSat.noradId);
@@ -446,7 +458,7 @@ export default function App() {
       )}
       {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
       <AgentPane
-        visible={agentVisible || workbench}
+        visible={agentVisible}
         onClose={() => setAgentVisible(false)}
         getContext={() => ({
           page: workbench ? "调度工作台" : "三维态势",

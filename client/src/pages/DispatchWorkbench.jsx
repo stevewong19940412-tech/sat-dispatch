@@ -8,6 +8,7 @@ const TASK_STATUS_COLOR = {
   '直控执行中': '#f5a524',
 };
 
+
 export default function DispatchWorkbench({ onBack }) {
   const [tab, setTab] = useState('tasks'); // tasks|orders|pool|plans|companies
   const [tasks, setTasks] = useState([]);
@@ -21,14 +22,22 @@ export default function DispatchWorkbench({ onBack }) {
   const [msg, setMsg] = useState(null);
 
   const load = useCallback(async () => {
-    setTasks(await api('/dispatch/tasks').catch(() => []));
-    setOrders(await api('/dispatch/orders').catch(() => []));
-    setPlans(await api('/dispatch/plans').catch(() => []));
-    setCompanies(await api('/dispatch/companies').catch(() => []));
-    setPool(await api('/dispatch/pool').catch(() => []));
+    // 并行拉取（原来是 5 个串行 await，最慢者拖累全部）
+    const [t, o, p, c, pl] = await Promise.all([
+      api('/dispatch/tasks').catch(() => []),
+      api('/dispatch/orders').catch(() => []),
+      api('/dispatch/plans').catch(() => []),
+      api('/dispatch/companies').catch(() => []),
+      api('/dispatch/pool').catch(() => []),
+    ]);
+    setTasks(t); setOrders(o); setPlans(p); setCompanies(c); setPool(pl);
   }, []);
 
-  useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000); // 8s→15s：列表类数据不需要高频
+    return () => clearInterval(t);
+  }, [load]);
 
   const openTask = async (id) => {
     setSelected(await api(`/dispatch/tasks/${id}`));
