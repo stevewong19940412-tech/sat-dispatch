@@ -33,9 +33,15 @@ api.get("/categories", (req, res) => {
   })));
 });
 
-// 全部卫星实时位置
+// 全部卫星实时位置 —— 服务端共享缓存（对照工作台 sseDataPump 架构）：
+// 传播结果全站共享 10s，N 个客户端 5s 轮询只触发 1 次真实计算，其余命中缓存
+let _posCache = { data: null, at: 0 };
 api.get("/positions", (req, res) => {
   const date = req.query.timestamp ? new Date(parseInt(req.query.timestamp)) : new Date();
+  const now = Date.now();
+  if (_posCache.data && now - _posCache.at < 10000) {
+    return res.json(_posCache.data);
+  }
   const sats = getAllSatellites();
   const positions = [];
   for (const sat of sats) {
@@ -51,8 +57,41 @@ api.get("/positions", (req, res) => {
       });
     }
   }
-  res.json({ satellites: positions, timestamp: date.getTime() });
+  const payload = { satellites: positions, timestamp: date.getTime() };
+  _posCache = { data: payload, at: now };
+  res.json(payload);
 });
+
+// SSE 单连接推送（对照工作台 sseBroadcast.ts）：替代客户端高频轮询
+const sseClients = new Set();
+let _sseCache = { data: null, at: 0 };
+api.get("/sse/positions", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.write(":connected\n\n");
+  // 立即推一份当前缓存
+  if (_posCache.data) res.write(`data: ${JSON.stringify(_posCache.data)}\n\n`);
+  sseClients.add(res);
+  const hb = setInterval(() => res.write(":hb\n\n"), 15000);
+  req.on("close", () => { clearInterval(hb); sseClients.delete(res); });
+});
+// SSE 泵：有订阅者才计算，10s 一次
+setInterval(() => {
+  if (sseClients.size === 0) return;
+  const date = new Date();
+  const sats = getAllSatellites();
+  const positions = [];
+  for (const sat of sats) {
+    const pos = propagate(sat, date);
+    if (pos) positions.push({ noradId: sat.noradId, name: sat.name, category: sat.category, ...pos });
+  }
+  _posCache = { data: { satellites: positions, timestamp: date.getTime() }, at: Date.now() };
+  const frame = `data: ${JSON.stringify(_posCache.data)}\n\n`;
+  for (const client of sseClients) client.write(frame);
+}, 10000);
 
 // 单星地面轨迹
 api.get("/track/:noradId", (req, res) => {

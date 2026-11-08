@@ -9,6 +9,7 @@ import SatelliteDetail from "./components/SatelliteDetail.jsx";
 import MissionsDrawer from "./components/MissionsDrawer.jsx";
 import MissionForm from "./components/MissionForm.jsx";
 import DispatchWorkbench from "./pages/DispatchWorkbench.jsx";
+import { useLiveStream } from "./hooks/useLiveStream.js";
 import { AgentPane, BladeWrapper } from "./agent/AgentPane.jsx";
 
 export default function App() {
@@ -95,7 +96,7 @@ export default function App() {
     api("/categories").then(setCategories).catch(() => {});
   }, []);
 
-  // ─── 实时位置轮询 ───
+  // ─── 实时位置：SSE 单连接推送 + 轮询兜底（对照工作台架构）───
   const fetchPositions = useCallback(async (timestamp) => {
     try {
       const url = timestamp ? `/positions?timestamp=${timestamp}` : "/positions";
@@ -104,12 +105,18 @@ export default function App() {
     } catch {}
   }, []);
 
+  const live = useLiveStream("positions", {
+    enabled: isLive && !workbench,
+    fallbackFetch: async () => {
+      const data = await api("/positions");
+      return data;
+    },
+    fallbackInterval: 10000,
+  });
   useEffect(() => {
-    if (!isLive || workbench) return; // 工作台全屏打开时暂停三维态势轮询，让出主线程与带宽
-    fetchPositions();
-    const t = setInterval(fetchPositions, 5000);
-    return () => clearInterval(t);
-  }, [isLive, workbench, fetchPositions]);
+    if (live.data?.satellites) setPositions(live.data.satellites);
+  }, [live.data]);
+  // 工作台打开时由 live.enabled=false 自动断流；关闭时自动重连
 
   // 时钟
   useEffect(() => {
@@ -461,6 +468,7 @@ export default function App() {
         visible={agentVisible}
         onClose={() => setAgentVisible(false)}
         getContext={() => ({
+          appOrigin: location.origin,
           page: workbench ? "调度工作台" : "三维态势",
           selectedTaskId: workbench ? undefined : null,
           timestamp: new Date().toISOString(),

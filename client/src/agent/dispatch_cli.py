@@ -7,8 +7,20 @@ import json, os, sqlite3, sys, urllib.request
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
 # 应用公网地址与 token：地址内置；token 由智能体沙盒环境变量 BLADE_API_TOKEN 提供
-APP_BASE = os.environ.get("DISPATCH_APP_BASE", "https://21141-2026-1106-0048-5uekmq1z-test.apps.bladeai.com.cn")
+APP_BASE = os.environ.get("DISPATCH_APP_BASE", location_origin_from_context() or "https://21141-2026-1106-0048-5uekmq1z-test.apps.bladeai.com.cn")
 API = APP_BASE + "/api/dispatch"
+
+def location_origin_from_context():
+    """从页面上下文文件读应用 origin（attachApp getContext 注入）"""
+    try:
+        p = os.environ.get('BLADE_APP_CONTEXT_FILE')
+        if p:
+            with open(p) as f:
+                ctx = json.load(f)
+            return ctx.get('appOrigin')
+    except Exception:
+        pass
+    return None
 
 def out(data):
     print(json.dumps(data, ensure_ascii=False, indent=1, default=str))

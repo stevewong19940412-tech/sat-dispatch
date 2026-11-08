@@ -4,9 +4,14 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { BladeClient } from "@blade-hq/agent-client";
 import { BladeProvider, ChatView } from "@blade-hq/agent-react";
 import "@blade-hq/agent-react/style.css";
-import cliPy from "./dispatch_cli.py?raw";
-import skillMd from "./skill_dispatch_ops.md?raw";
-import roleMd from "./role_prompt.md?raw";
+import cliPyRaw from "./dispatch_cli.py?raw";
+import skillMdRaw from "./skill_dispatch_ops.md?raw";
+import roleMdRaw from "./role_prompt.md?raw";
+// 部署自适应：把当前页面 origin 注入 CLI 环境（覆盖脚本内置的开发地址）
+const cliPy = cliPyRaw;
+const runtimeNote = `\n## 本次会话运行环境\n\n- 调度系统 API 地址：${location.origin}\n- dispatch_cli.py 第 10 行 APP_BASE 需替换为上面的地址后使用（或 export DISPATCH_APP_BASE=${location.origin} 后调用）。\n`;
+const skillMd = skillMdRaw + runtimeNote;
+const roleMd = roleMdRaw;
 
 const BA_URL = "https://agent.bladeai.com.cn";
 const BA_URL_KEY = "blade-app:sat-dispatch:ba-url";
