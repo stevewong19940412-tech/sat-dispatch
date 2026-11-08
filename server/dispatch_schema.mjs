@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   slewDeg REAL,                            -- 所需侧摆角
   availability REAL,                       -- 成像可用度评分 A (0-100)
   cloudFc REAL,                            -- 云量预报值
+  cloudSource TEXT DEFAULT 'simulated',    -- 云量来源 real|simulated
   orbitGrade TEXT DEFAULT '高',            -- 轨道数据分档 高|中|低
   shadowInfer INTEGER DEFAULT 0,           -- 影子推断标注
   filtered INTEGER DEFAULT 0,              -- 约束筛选是否剔除

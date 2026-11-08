@@ -6,6 +6,7 @@ import {
   normalizeTaskStrips, computeVisibleWindows, forecastCloud, cloudEffective,
   applyConstraints, getCapability, haversineKm,
 } from "./candidate_calc.mjs";
+import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { rankTask } from "./priority_calc.mjs";
 import { solarElevationDegFor } from "./solar.mjs";
 
@@ -75,7 +76,7 @@ dispatchApi.get("/tasks/:id", (req, res) => {
   if (!t) return res.status(404).json({ error: 'task not found' });
   t.geom = JSON.parse(t.geom);
   t.rankings = db.prepare(`
-    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.orbitGrade, c.stripIdx, c.stripCount
+    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.cloudSource, c.orbitGrade, c.stripIdx, c.stripCount
     FROM rankings r JOIN candidates c ON c.id = r.candidateId
     WHERE r.taskId=? ORDER BY r.rank LIMIT 30`).all(t.id);
   t.orders = db.prepare("SELECT * FROM orders WHERE taskId=? ORDER BY id DESC").all(t.id);
@@ -94,7 +95,7 @@ dispatchApi.delete("/tasks/:id", (req, res) => {
 });
 
 // ─── 候选卫星计算（4.3）──────────────────────────────────────────────────
-dispatchApi.post("/tasks/:id/candidates", (req, res) => {
+dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(+req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
 
@@ -117,8 +118,8 @@ dispatchApi.post("/tasks/:id/candidates", (req, res) => {
 
   db.prepare("DELETE FROM candidates WHERE taskId=?").run(task.id);
   const ins = db.prepare(`INSERT INTO candidates (taskId,stripIdx,stripCount,satNoradId,satName,company,
-      windowStart,windowEnd,overpassTime,slewDeg,availability,cloudFc,orbitGrade,filtered,filterReason,validRes)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      windowStart,windowEnd,overpassTime,slewDeg,availability,cloudFc,orbitGrade,filtered,filterReason,validRes, cloudSource)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?)`);
 
   const winStartT = new Date(task.windowStart).getTime();
   const leadDays = Math.max(0, (winStartT - tCreated.getTime()) / 86400000);
@@ -133,7 +134,7 @@ dispatchApi.post("/tasks/:id/candidates", (req, res) => {
       const windows = computeVisibleWindows(sat, strip, opts);
       for (const w of windows.slice(0, 3)) { // 每条带最多3个窗口
         const overpass = new Date(w.overpass);
-        const cloud = forecastCloud(strip.lat, strip.lon, overpass, leadDays);
+        const { cloud, source: cloudSrc } = await forecastCloudReal(strip.lat, strip.lon, overpass, leadDays);
         const sunEl = solarElevationDegFor(strip.lat, strip.lon, overpass);
         const { ceff, availability } = cloudEffective(cloud, w.slewDeg, sunEl);
         const cand = { slewDeg: w.slewDeg, overpassTime: overpass.toISOString(), cloudFc: cloud };
@@ -149,7 +150,7 @@ dispatchApi.post("/tasks/:id/candidates", (req, res) => {
           new Date(w.start).toISOString(), new Date(w.end).toISOString(),
           overpass.toISOString(), Math.round(w.slewDeg * 10) / 10,
           Math.round(availability * 10) / 10, Math.round(cloud * 1000) / 1000,
-          '高', pass ? 0 : 1, pass ? null : reasons.join('；'), Math.round(validRes * 100) / 100);
+          '高', pass ? 0 : 1, pass ? null : reasons.join('；'), Math.round(validRes * 100) / 100, cloudSrc);
         if (pass) inserted++;
         anyInserted = true;
         if (inserted > 200) break; // 上限保护
