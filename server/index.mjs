@@ -186,9 +186,15 @@ app.use("/api/dispatch", dispatchApi);
 const distDir = existsSync(join(__dirname, "..", "client-dist"))
   ? join(__dirname, "..", "client-dist")
   : join(__dirname, "..", "client", "dist");
-app.use(express.static(distDir));
+// index.html 不缓存（防用户浏览器拿旧HTML指向旧资源hash），带hash的静态资源长缓存
+app.use(express.static(distDir, {
+  setHeaders(res, path) {
+    if (path.endsWith(".html")) res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  },
+}));
 app.get("/*any", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   res.sendFile(join(distDir, "index.html"));
 });
 
