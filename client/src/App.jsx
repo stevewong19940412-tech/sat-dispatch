@@ -9,6 +9,7 @@ import SatelliteDetail from "./components/SatelliteDetail.jsx";
 import MissionsDrawer from "./components/MissionsDrawer.jsx";
 import MissionForm from "./components/MissionForm.jsx";
 import DispatchWorkbench from "./pages/DispatchWorkbench.jsx";
+import { AgentPane, BladeWrapper } from "./agent/AgentPane.jsx";
 
 export default function App() {
   const containerRef = useRef(null);
@@ -52,6 +53,7 @@ export default function App() {
   const [cursorGeo, setCursorGeo] = useState(null);
   // 调度工作台
   const [workbench, setWorkbench] = useState(false);
+  const [agentVisible, setAgentVisible] = useState(false);
 
   const groupColors = useMemo(() => {
     const m = {};
@@ -237,6 +239,7 @@ export default function App() {
 
   // ─── 渲染 ───
   return (
+    <BladeWrapper>
     <>
       {/* 三维容器 */}
       <div ref={containerRef} style={{ position: "fixed", inset: 0, cursor: aoiMode ? "crosshair" : "default" }} />
@@ -265,6 +268,9 @@ export default function App() {
           <button className="btn secondary" style={{ padding: "4px 12px", borderColor: "var(--accent)", color: "var(--accent)" }}
             onClick={() => setWorkbench(true)}>
             调度工作台
+          </button>
+          <button className="btn" style={{ padding: "4px 12px" }} onClick={() => setAgentVisible(!agentVisible)}>
+            AI 下单助手
           </button>
           <button className="btn" style={{ padding: "4px 12px" }}
             onClick={() => { setEditingMission(null); setShowMissionForm(true); }}>
@@ -439,6 +445,16 @@ export default function App() {
         />
       )}
       {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
+      <AgentPane
+        visible={agentVisible || workbench}
+        onClose={() => setAgentVisible(false)}
+        getContext={() => ({
+          page: workbench ? "调度工作台" : "三维态势",
+          selectedTaskId: workbench ? undefined : null,
+          timestamp: new Date().toISOString(),
+        })}
+      />
     </>
+    </BladeWrapper>
   );
 }

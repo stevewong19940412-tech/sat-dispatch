@@ -343,6 +343,18 @@ dispatchApi.get("/orders", (req, res) => {
   res.json(db.prepare("SELECT * FROM orders ORDER BY id DESC LIMIT 200").all());
 });
 
+// 供智能体 CLI 的只读 SQL 查询（白名单表，SELECT only）
+dispatchApi.post("/_sql", (req, res) => {
+  const { sql, args = [] } = req.body ?? {};
+  if (!sql || !/^\s*SELECT/i.test(sql)) return res.status(400).json({ error: "仅允许 SELECT" });
+  const blocked = /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|PRAGMA)\b/i;
+  if (blocked.test(sql)) return res.status(400).json({ error: "仅允许 SELECT 查询" });
+  try {
+    const rows = db.prepare(sql).all(...args);
+    res.json(rows);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 dispatchApi.get("/companies", (req, res) => {
   res.json(db.prepare("SELECT * FROM companies ORDER BY id").all());
 });

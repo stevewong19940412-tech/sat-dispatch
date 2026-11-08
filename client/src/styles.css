@@ -386,3 +386,46 @@ body {
 .tle-age.fresh { background: rgba(45,212,167,0.12); color: var(--accent); }
 .tle-age.stale { background: rgba(245,165,36,0.12); color: var(--warn); }
 .tle-age.old { background: rgba(244,82,94,0.12); color: var(--danger); }
+
+/* ─── Blade Agent 对话面板（浅色区，组件自带浅色主题） ─── */
+.blade-resizer {
+  flex: 0 0 12px;
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+  z-index: 310;
+}
+.blade-resizer::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: currentColor;
+  opacity: 0.15;
+}
+.blade-resizer:hover::after { opacity: 0.4; }
+.agent-tool-btn {
+  background: none; border: 1px solid #e2e8f0; border-radius: 5px;
+  width: 26px; height: 26px; cursor: pointer; font-size: 13px; color: #475569;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.agent-tool-btn:hover { background: #f1f5f9; }
+.agent-primary-btn {
+  background: #0d9488; color: #fff; border: none; border-radius: 6px;
+  padding: 8px 20px; font-size: 13px; cursor: pointer; font-weight: 500;
+}
+.agent-primary-btn:hover { background: #0f766e; }
+.agent-primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.agent-input {
+  width: 100%; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 5px;
+  font-size: 12.5px; outline: none; box-sizing: border-box;
+}
+.agent-history-new {
+  width: 100%; padding: 10px 14px; background: none; border: none; border-bottom: 1px solid #e2e8f0;
+  text-align: left; font-size: 13px; color: #0d9488; cursor: pointer; font-weight: 600;
+}
+.agent-history-new:hover { background: #f0fdf9; }
+.agent-history-item { padding: 8px 14px; cursor: pointer; border-bottom: 1px solid #f1f5f9; }
+.agent-history-item:hover { background: #f8fafc; }
