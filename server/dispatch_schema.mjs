@@ -165,6 +165,14 @@ CREATE INDEX IF NOT EXISTS idx_cand_task ON candidates(taskId);
 CREATE INDEX IF NOT EXISTS idx_rank_task ON rankings(taskId);
 CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
 `);
+// ─── 启动自动迁移：旧库缺列时补上（部署卷带旧库不重建） ───
+{
+  const cols = db.prepare("PRAGMA table_info(candidates)").all().map(c => c.name);
+  if (!cols.includes("cloudSource")) {
+    db.exec("ALTER TABLE candidates ADD COLUMN cloudSource TEXT DEFAULT 'simulated'");
+    console.log("[schema] candidates.cloudSource 列已自动迁移");
+  }
+}
 
 export function nextTaskNo() {
   const d = new Date();
