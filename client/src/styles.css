@@ -413,11 +413,19 @@ body {
 .agent-pane .blade-chat-root {
   font-family: var(--font-body);
 }
-/* 滚动条兜底：消息流容器必须可滚 */
-.agent-pane [class*="scroll"] { scrollbar-width: thin; scrollbar-color: rgba(56,88,140,0.6) transparent; }
-.agent-pane ::-webkit-scrollbar { width: 6px; }
-.agent-pane ::-webkit-scrollbar-thumb { background: rgba(56,88,140,0.55); border-radius: 3px; }
-.agent-pane ::-webkit-scrollbar-track { background: transparent; }
+/* 滚动条：加宽加亮，确保肉眼可见可拖 */
+.agent-pane * {
+  scrollbar-width: auto;
+  scrollbar-color: #3d5a80 #141c30;
+}
+.agent-pane ::-webkit-scrollbar { width: 10px; height: 10px; }
+.agent-pane ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #3d5a80, #2d4368);
+  border-radius: 5px;
+  border: 2px solid #141c30;
+}
+.agent-pane ::-webkit-scrollbar-thumb:hover { background: #5578a8; }
+.agent-pane ::-webkit-scrollbar-track { background: #141c30; }
 .blade-resizer {
   flex: 0 0 12px;
   cursor: col-resize;
