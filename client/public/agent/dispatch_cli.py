@@ -5,6 +5,9 @@
 """
 import json, os, sqlite3, sys, urllib.request
 
+CLI_VERSION = 3  # v3: 自动地址探测+weather/recommend/delete（v1=写死地址 v2=基础命令）
+CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
+
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
 # 应用公网地址与 token：地址内置；token 由智能体沙盒环境变量 BLADE_API_TOKEN 提供
 # 地址解析链：环境变量 → 页面上下文注入 → 常驻服务兜底（常驻服务长期在线，不再写死任何开发端口）
@@ -63,6 +66,7 @@ def _headers():
     return h
 
 def api_req(path, method="GET", body=None):
+    check_version()
     req = urllib.request.Request(API + path, method=method,
         headers=_headers(),
         data=json.dumps(body).encode() if body else None)
@@ -76,7 +80,34 @@ def q(sql, args=()):
     # 便捷查询统一走 API（CLI 不直接连库，保持部署解耦）
     return api_req("/_sql", "POST", {"sql": sql, "args": list(args)})
 
+def self_update():
+    """从应用拉最新 CLI 覆盖自身（旧副本自愈）"""
+    try:
+        url = APP_BASE + "/agent/dispatch_cli.py"
+        req = urllib.request.Request(url, headers=_headers())
+        with urllib.request.urlopen(req, timeout=15) as r:
+            new_src = r.read().decode()
+        with open(__file__, "w") as f:
+            f.write(new_src)
+        print("CLI 已自更新到最新版，请重跑命令")
+        sys.exit(0)
+    except Exception as e:
+        die(f"自更新失败: {e}")
+
+def check_version():
+    """连上服务端后对比 CLI 版本，旧则提示 --self-update（一次性静默，不阻塞）"""
+    try:
+        req = urllib.request.Request(APP_BASE + "/api/dispatch/cli-version", headers=_headers())
+        with urllib.request.urlopen(req, timeout=5) as r:
+            srv = json.loads(r.read().decode()).get("version", 0)
+        if srv > CLI_VERSION:
+            print(f"⚠ dispatch CLI 是旧版(v{CLI_VERSION})，服务端已到 v{srv}。执行 dispatch --self-update 更新。", file=sys.stderr)
+    except Exception:
+        pass
+
 def main():
+    if "--self-update" in sys.argv:
+        self_update()
     if len(sys.argv) < 2:
         cmd = "help"
     else:

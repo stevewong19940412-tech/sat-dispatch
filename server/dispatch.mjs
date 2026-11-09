@@ -78,6 +78,11 @@ dispatchApi.post("/tasks", (req, res) => {
 });
 
 // AI 建单联动：最近 3 分钟内由 AI 创建的任务（供工作台自动打开）
+// CLI 版本对账（旧副本自愈：CLI 启动时对比，旧则提示 --self-update）
+dispatchApi.get("/cli-version", (req, res) => {
+  res.json({ version: 3 });
+});
+
 dispatchApi.get("/latest", (req, res) => {
   const row = db.prepare(`SELECT id FROM tasks WHERE source='对话下单'
     AND createdAt >= datetime('now', '-3 minutes') ORDER BY id DESC LIMIT 1`).get();
