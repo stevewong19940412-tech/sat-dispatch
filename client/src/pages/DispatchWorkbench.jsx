@@ -256,9 +256,9 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
           {/* 排序清单 */}
           {selected.rankings?.length > 0 && (
             <>
-              <div className="section-label">排序清单（S = Q × R × C）</div>
+              <div className="section-label">候选卫星优先级排序</div>
               <table className="mission-table" style={{ fontSize: 11.5 }}>
-                <thead><tr><th>#</th><th>卫星</th><th>公司</th><th>过顶时刻</th><th>侧摆</th><th>云量</th><th>可用度</th><th>S</th></tr></thead>
+                <thead><tr><th>#</th><th>卫星</th><th>公司</th><th>过顶时刻</th><th>侧摆</th><th>云量</th><th>可用度</th><th>优先级评分</th></tr></thead>
                 <tbody>
                   {selected.rankings.slice(0, 12).map(r => (
                     <tr key={r.id}>
@@ -271,7 +271,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                         {(r.cloudFc * 100).toFixed(0)}%{r.cloudSource === 'real' ? ' 🛰' : ''}
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)' }}>{r.availability}</td>
-                      <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)', fontWeight: 600 }}>{r.S}</td>
+                      <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)', fontWeight: 600 }}>{Number(r.S).toFixed(1)}</td>
                     </tr>
                   ))}
                 </tbody>
