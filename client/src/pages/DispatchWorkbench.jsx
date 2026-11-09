@@ -422,35 +422,32 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             </>
           )}
 
-          {/* 关联订单 */}
-          {selected.orders?.length > 0 && (
-            <>
-              {/* 任务包：给公司执行 / 直控生成的入口（按分流通道显示对应动作） */}
-          {selected.rankings?.length > 0 && (
+          {/* 任务包：确认下发后出现，通道由人工选择——派给公司 或 生成直控任务指令 */}
+          {selected.pendingConfirm !== 1 && (
             <div style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 4, border: '1px solid var(--border)' }}>
               <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>任务包</div>
-              {/* 询价/指派通道：公司执行包（订单要素） */}
               {selected.orders?.length > 0 && (
                 <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 6 }}>
                   公司执行包已生成：{selected.orders.map(o => `${o.orderNo}（${o.company} · ${o.channel}）`).join('、')}，要素含目标 AOI/时窗/分辨率/云量，见订单跟踪 Tab。
                 </div>
               )}
-              {/* 人工选择通道：派给公司（询价/指派）或 生成直控任务指令 */}
               {selected.status === '待派单' && (
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button className="btn" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
                     onClick={async () => {
                       try {
+                        if (!selected.rankings?.length) await runCandidates(selected.id);
                         const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '询价' }) });
-                        setMsg({ ok: true, text: `已派给公司（${d.rule}）：${(d.inquiries ?? []).length > 0 ? '询价' + d.inquiries.length + '家 + ' : ''}主单 ${d.orderNo ?? ''}` });
+                        setMsg({ ok: true, text: `已派给公司：主单 ${d.orderNo ?? ''}${(d.inquiries ?? []).length ? '，询价' + d.inquiries.length + '家' : ''}` });
                         await openTask(selected.id);
                       } catch (e) { setMsg({ ok: false, text: e.message }); }
                     }}>派给公司</button>
                   <button className="btn danger" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
                     onClick={async () => {
                       try {
+                        if (!selected.rankings?.length) await runCandidates(selected.id);
                         const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '直控' }) });
-                        setMsg({ ok: true, text: '直控方案已建立，去「直控方案」Tab 计算参数包并核验上注' });
+                        setMsg({ ok: true, text: '直控方案已建立，在下方「直控执行方案」生成参数包并核验上注' });
                         setTab('plans');
                         await openTask(selected.id);
                       } catch (e) { setMsg({ ok: false, text: e.message }); }
@@ -463,6 +460,9 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
               )}
             </div>
           )}
+
+          {selected.orders?.length > 0 && (
+            <>
           <div className="section-label">关联订单</div>
               {selected.orders.map(o => (
                 <div key={o.id} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: '8px 12px', marginBottom: 6, fontSize: 12 }}>
