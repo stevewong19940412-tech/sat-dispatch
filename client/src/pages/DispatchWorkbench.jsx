@@ -9,7 +9,7 @@ const TASK_STATUS_COLOR = {
 };
 
 
-export default function DispatchWorkbench({ onBack }) {
+export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   const [tab, setTab] = useState('tasks'); // tasks|orders|pool|plans|companies
   const [tasks, setTasks] = useState([]);
   const [selected, setSelected] = useState(null); // 任务详情
@@ -20,6 +20,8 @@ export default function DispatchWorkbench({ onBack }) {
   const [pool, setPool] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // AOI 圈选预填：进工作台自动弹新建任务，坐标已带
+  const [autoOpenNew, setAutoOpenNew] = useState(!!aoiPrefill);
 
   const load = useCallback(async () => {
     // 并行拉取（原来是 5 个串行 await，最慢者拖累全部）
@@ -142,7 +144,11 @@ export default function DispatchWorkbench({ onBack }) {
         {tab === 'companies' && <CompaniesTab companies={companies} />}
       </div>
 
-      {showNew && <NewTaskModal onClose={() => setShowNew(false)} onCreated={async (id) => { setShowNew(false); await load(); await openTask(id); setTab('tasks'); }} />}
+      {showNew && <NewTaskModal onClose={() => setShowNew(false)} onCreated={async (id) => { setShowNew(false); await load(); await openTask(id); setTab('tasks'); }} aoiPrefill={aoiPrefill} />}
+      {autoOpenNew && !showNew && <NewTaskModal
+        onClose={() => setAutoOpenNew(false)}
+        onCreated={async (id) => { setAutoOpenNew(false); await load(); await openTask(id); setTab('tasks'); }}
+        aoiPrefill={aoiPrefill} />}
     </div>
   );
 }
@@ -418,10 +424,14 @@ function CompaniesTab({ companies }) {
 }
 
 // ─── 新建任务弹窗 ─────────────────────────────────────────────────────────
-function NewTaskModal({ onClose, onCreated }) {
+function NewTaskModal({ onClose, onCreated, aoiPrefill }) {
   const [form, setForm] = useState({
-    taskName: '', targetName: '', targetType: '城区',
-    geomType: 'point', lat: '39.9042', lon: '116.4074',
+    taskName: aoiPrefill ? `AOI圈选任务 (${aoiPrefill.lat.toFixed(2)},${aoiPrefill.lon.toFixed(2)})` : '',
+    targetName: aoiPrefill ? `AOI 圆心 ${aoiPrefill.lat.toFixed(2)}°,${aoiPrefill.lon.toFixed(2)}° r${aoiPrefill.radiusKm}km` : '',
+    targetType: '城区',
+    geomType: 'point',
+    lat: aoiPrefill ? String(aoiPrefill.lat) : '39.9042',
+    lon: aoiPrefill ? String(aoiPrefill.lon) : '116.4074',
     obsType: 'optical', resolution: '1.0', spectral: '',
     windowStart: '', windowEnd: '', maxCloud: '0.3', maxSlewDeg: '45',
     timelinessHours: '', priority: '常规',

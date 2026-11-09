@@ -54,6 +54,8 @@ export default function App() {
   const [cursorGeo, setCursorGeo] = useState(null);
   // 调度工作台
   const [workbench, setWorkbench] = useState(false);
+  // AOI 圈选预填（圈选后直通工作台新建任务）
+  const [aoiPrefill, setAoiPrefill] = useState(null);
   const [agentVisible, setAgentVisible] = useState(false);
 
   const groupColors = useMemo(() => {
@@ -280,13 +282,14 @@ export default function App() {
           <span className={`live-badge ${isLive ? "" : "paused"}`} onClick={() => setIsLive(!isLive)}>
             <span className="dot" />{isLive ? "实时" : "暂停"}
           </span>
-          <button className="btn secondary" style={{ padding: "4px 12px" }}
-            onClick={() => { setMissionsOpen(true); setMissionsMinimized(false); }}>
-            任务管理
-          </button>
           <button className="btn secondary" style={{ padding: "4px 12px", borderColor: "var(--accent)", color: "var(--accent)" }}
             onClick={() => setWorkbench(true)}>
             调度工作台
+          </button>
+          <button className="btn secondary" style={{ padding: "4px 12px" }}
+            onClick={() => { setMissionsOpen(true); setMissionsMinimized(false); }}
+            title="观测计划档案（底座功能）">
+            观测档案
           </button>
           <button className="btn" style={{ padding: "4px 12px" }} onClick={() => setAgentVisible(!agentVisible)}>
             AI 下单助手
@@ -400,9 +403,10 @@ export default function App() {
                 </div>
                 <div className="btn-row">
                   <button className="btn" onClick={() => {
-                    setEditingMission(null);
-                    setShowMissionForm(true);
-                  }}>据此建任务</button>
+                    // 直通调度工作台：以圈选 AOI 圆心预填新建任务表单
+                    setAoiPrefill({ lat: aoiPoint.lat, lon: aoiPoint.lon, radiusKm: aoiRadius });
+                    setWorkbench(true);
+                  }}>据此建调度任务</button>
                   <button className="btn secondary" onClick={() => setAoiPoint(null)}>清除</button>
                 </div>
               </>
@@ -463,7 +467,7 @@ export default function App() {
           onSaved={missionSaved}
         />
       )}
-      {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
+      {workbench && <DispatchWorkbench onBack={() => { setWorkbench(false); setAoiPrefill(null); }} aoiPrefill={aoiPrefill} />}
       <AgentPane
         visible={agentVisible}
         onClose={() => setAgentVisible(false)}

@@ -40,7 +40,10 @@ export default function MissionsDrawer({ minimized, onToggle, onClose, version, 
   return (
     <div className={`missions-drawer ${minimized ? "minimized" : ""}`}>
       <div className="missions-drawer-header" onClick={onToggle}>
-        <span className="title">成像侦察任务</span>
+        <span className="title">观测计划档案</span>
+        <span style={{ fontSize: 10.5, color: "var(--text-dim)", marginLeft: 8 }} title="底座档案：记录观测计划与AOI，与调度工作台的调度任务相互独立">
+          与调度任务相互独立
+        </span>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)" }}>
           共 {missions.length} 项
           {missions.length > 0 && ` · 进行中 ${missions.filter(m => m.status === "active").length}`}
