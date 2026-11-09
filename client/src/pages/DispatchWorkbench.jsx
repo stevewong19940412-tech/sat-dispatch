@@ -143,12 +143,40 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 
       <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}>
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
-          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} />}
+          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
         {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
         {tab === 'companies' && <CompaniesTab companies={companies} />}
       </div>
+
+      {/* 删除确认弹窗（自定义，不用原生 confirm——嵌入环境会被静默拦截） */}
+      {deleteConfirm && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setDeleteConfirm(null); }}>
+          <div className="modal" style={{ width: 360 }}>
+            <div className="modal-header">删除任务单
+              <button className="close-btn" style={{ marginLeft: 'auto' }} onClick={() => setDeleteConfirm(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 13, lineHeight: 1.9, color: 'var(--text-main)' }}>
+                确认删除任务 <b style={{ color: 'var(--text-bright)', fontFamily: 'var(--font-mono)' }}>{deleteConfirm.taskNo}</b>
+                <span style={{ marginLeft: 6 }}>「{deleteConfirm.taskName}」</span>？
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-dim)' }}>
+                  将同时删除其候选卫星、排序清单与关联订单，此操作不可恢复。
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                <button className="btn secondary" onClick={() => setDeleteConfirm(null)}>取消</button>
+                <button className="btn danger" onClick={async () => {
+                  const id = deleteConfirm.id;
+                  setDeleteConfirm(null);
+                  await deleteTask(id);
+                }}>确认删除</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
 
     </div>
@@ -156,14 +184,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 }
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
-function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask }) {
-  // 两段式删除确认：第一次点击进入"待确认"态（3秒后自动还原）
-  const [pendingDelete, setPendingDelete] = useState(null);
-  useEffect(() => {
-    if (!pendingDelete) return;
-    const t = setTimeout(() => setPendingDelete(null), 3000);
-    return () => clearTimeout(t);
-  }, [pendingDelete]);
+function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete }) {
+  // 删除确认弹窗（自定义 Modal；原生 confirm 在嵌入预览环境会被静默拦截）
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
@@ -188,13 +211,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                   <button className="btn secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); openTask(t.id); }}>详情</button>
                   {['待派单', '挂任务池'].includes(t.status) && (
                     <button className="btn danger" style={{ padding: '2px 8px', fontSize: 11 }}
-                      onClick={e => {
-                        e.stopPropagation();
-                        if (pendingDelete === t.id) { setPendingDelete(null); deleteTask(t.id); }
-                        else setPendingDelete(t.id);
-                      }}>
-                      {pendingDelete === t.id ? '确认删除?' : '删除'}
-                    </button>
+                      onClick={e => { e.stopPropagation(); onRequestDelete(t); }}>删除</button>
                   )}
                 </td>
               </tr>
