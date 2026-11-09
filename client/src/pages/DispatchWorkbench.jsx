@@ -193,6 +193,18 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                     <div>指令序列开始：{pack.sequenceStart?.slice(11, 19)} UTC（TCA 前 {(() => {
                       const d = (new Date(pack.tca) - new Date(pack.sequenceStart)) / 1000; return Math.round(d);
                     })()}s）</div>
+                    {(() => {
+                      const img = pack.commands.find(c => c.action === '成像');
+                      const ip = img?.param ?? {};
+                      return (
+                        <div style={{ fontSize: 11.5, color: 'var(--text-dim)', margin: '6px 0' }}>
+                          成像参数：{ip.imagingMode} ｜ TDI {ip.tdiStages} 级 ｜ 积分 {ip.integrationMs} ms（像移 {ip.imageMotionVelKmS} km/s 匹配）｜ 压缩 {ip.compression}:1 {ip.compressionMode}
+                          <br/>条带方向：{pack.stripDirection} ｜ 数传窗口：{pack.downlinkPass
+                            ? `${pack.downlinkPass.station} ${pack.downlinkPass.arcStart?.slice(11, 19)} UTC（maxEl ${pack.downlinkPass.maxElDeg}°）`
+                            : '待下一圈过站下传'}
+                        </div>
+                      );
+                    })()}
                     <div>指令序列（{pack.commands.length} 条）：</div>
                     <table className="mission-table" style={{ fontSize: 10.5, margin: '4px 0 8px' }}>
                       <thead><tr><th>#</th><th>动作</th><th>偏移</th><th>时长</th></tr></thead>
@@ -324,7 +336,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', marginLeft: 'auto' }}>{selected.taskNo}</span>
           </div>
           <div className="kv-grid">
-            <div className="kv"><div className="k">目标</div><div className="v">{selected.targetName}</div></div>
+            <div className="kv"><div className="k">任务名称</div><div className="v">{selected.targetName}</div></div>
             <div className="kv"><div className="k">观测类型</div><div className="v">{selected.obsType === 'sar' ? 'SAR' : '光学'}</div></div>
             <div className="kv"><div className="k">分辨率要求</div><div className="v">{selected.resolution} m</div></div>
             <div className="kv"><div className="k">最大云量</div><div className="v">{(selected.maxCloud * 100).toFixed(0)}%</div></div>
@@ -332,26 +344,42 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             <div className="kv"><div className="k">时效要求</div><div className="v">{selected.timelinessHours ? `${selected.timelinessHours}h` : '—'}</div></div>
           </div>
 
+          {/* 目标 AOI：解算出的实际拍摄坐标/区域（给公司执行的依据） */}
+          {(() => {
+            const g = selected.geom ? (typeof selected.geom === 'string' ? JSON.parse(selected.geom) : selected.geom) : null;
+            const topRank = selected.rankings?.[0];
+            return (
+              <div style={{ margin: '10px 0', padding: '8px 12px', borderRadius: 4, background: 'rgba(45,212,167,0.05)', border: '1px solid rgba(45,212,167,0.25)' }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--accent)', marginBottom: 4 }}>成像目标 AOI（解算值）</div>
+                <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-bright)' }}>
+                  {g?.lat != null
+                    ? `点目标 ${Number(g.lat).toFixed(4)}°, ${Number(g.lon).toFixed(4)}°`
+                    : g?.coords ? `面目标 ${g.coords.length} 个顶点多条带` : '—'}
+                </div>
+                {topRank?.imgWinStart && (
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                    首选过顶：{topRank.overpassTime?.slice(5, 19)} UTC ｜ 最近距离 {topRank.minDistKm?.toFixed(1)} km ｜ 覆盖窗 {topRank.imgWinStart?.slice(11, 19)}~{topRank.imgWinEnd?.slice(11, 19)}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {selected.pendingConfirm === 1 && (
             <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 4, fontSize: 12.5,
               background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.4)', color: 'var(--text-bright)' }}>
-              ⚠ 该任务由 AI 创建，尚未人工确认下发。请核对右侧任务要素（目标/分辨率/时间窗/云量）后确认。
+              ⚠ 该任务由 AI 创建，尚未人工确认下发。请核对下方目标 AOI 与任务要素后确认。
               <div style={{ marginTop: 8 }}>
                 <button className="btn" disabled={busy} onClick={async () => {
                   try {
                     await api(`/dispatch/tasks/${selected.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
-                    setMsg({ ok: true, text: '已确认下发，可执行候选计算与派单' });
+                    setMsg({ ok: true, text: '已确认下发，进入派单分流' });
                     await openTask(selected.id);
                   } catch (e) { setMsg({ ok: false, text: e.message }); }
                 }}>确认下发</button>
               </div>
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8, margin: '12px 0' }}>
-            <button className="btn" disabled={busy} onClick={() => runCandidates(selected.id)}>① 候选计算</button>
-            <button className="btn" disabled={busy || !selected.rankings?.length || selected.pendingConfirm === 1}
-              onClick={() => doDispatch(selected.id)}>② 派单分流</button>
-          </div>
           {/* 执行链路指引（状态驱动）：让 AI 下单与工作台操作无缝衔接 */}
           {selected.source === '对话下单' && (
             <div style={{ margin: '8px 0 12px', padding: '8px 12px', borderRadius: 4, fontSize: 12,
@@ -393,7 +421,34 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
           {/* 关联订单 */}
           {selected.orders?.length > 0 && (
             <>
-              <div className="section-label">关联订单</div>
+              {/* 任务包：给公司执行 / 直控生成的入口（按分流通道显示对应动作） */}
+          {selected.rankings?.length > 0 && (
+            <div style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 4, border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>任务包</div>
+              {/* 询价/指派通道：公司执行包（订单要素） */}
+              {selected.orders?.length > 0 && (
+                <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 6 }}>
+                  公司执行包已生成：{selected.orders.map(o => `${o.orderNo}（${o.company} · ${o.channel}）`).join('、')}，要素含目标 AOI/时窗/分辨率/云量，见订单跟踪 Tab。
+                </div>
+              )}
+              {/* 直控参数生成入口：用户此前提过的按钮——点后跳到直控 Tab 并生成参数包 */}
+              {selected.status === '待派单' && (
+                <button className="btn secondary" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
+                  onClick={async () => {
+                    try {
+                      await doDispatch(selected.id);
+                      setTab('plans');
+                      setMsg({ ok: true, text: '已生成分流方案；直控方案在「直控方案」Tab 可生成参数包并核验上注' });
+                    } catch (e) { setMsg({ ok: false, text: e.message }); }
+                  }}>生成任务包并分流</button>
+              )}
+              {selected.status === '直控执行中' && (
+                <button className="btn secondary" style={{ padding: '3px 12px', fontSize: 11.5 }}
+                  onClick={() => setTab('plans')}>查看直控参数包 →</button>
+              )}
+            </div>
+          )}
+          <div className="section-label">关联订单</div>
               {selected.orders.map(o => (
                 <div key={o.id} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: '8px 12px', marginBottom: 6, fontSize: 12 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>

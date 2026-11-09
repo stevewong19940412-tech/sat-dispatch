@@ -447,6 +447,34 @@ dispatchApi.get("/pool", (req, res) => {
 
 // ─── 应急直控（4.6）──────────────────────────────────────────────────────
 // 指令生成（规则引擎，确定性）+ 独立校验
+// 成像参数解算（敏捷卫星 TDI 推扫口径，依据 ISPRS 2024 / TDI 像移速度匹配文献）
+// 太阳高度角 → TDI 级数；轨道高度+像移速度 → 积分时间；GSD → 压缩比
+export function buildImagingParams(plan, strip, imagingSec) {
+  // 太阳高度角：由 candidates 精化段带下来（plan.sunElDeg），缺失时按当地上午10:30典型值 40° 估
+  const sunEl = plan.sunElDeg ?? 40;
+  const tdiStages = sunEl > 30 ? 8 : sunEl >= 10 ? 16 : 32;
+  // 像移速度匹配：地面像移速度 v = v_orbit × R/(R+h)；v_orbit ≈ 7.5 km/s（LEO），GEO 用 3.1 km/s（同步视场）
+  const altKm = plan.altKm ?? 500;
+  const isGEO = altKm > 10000;
+  const vOrbit = isGEO ? 3.1 : 7.5;
+  const vGround = vOrbit * 6371 / (6371 + altKm); // km/s
+  // 像元地面尺寸 = GSD；积分时间 = 像元地面尺寸 / 像移速度（秒）
+  const gsdM = plan.resolutionM ?? 2;
+  const integrationSec = (gsdM / 1000) / vGround;
+  // 压缩比：GSD≤1m 高细节 → 2:1；≤4m → 3:1；更粗 → 4:1
+  const compression = gsdM <= 1 ? 2 : gsdM <= 4 ? 3 : 4;
+  return {
+    gain: '自动',
+    tdiStages,
+    integrationMs: Math.round(integrationSec * 1e6) / 1000,  // ms，保留3位
+    imageMotionVelKmS: Math.round(vGround * 100) / 100,
+    compression,
+    compressionMode: 'JPEG2000',
+    strip,
+    imagingMode: isGEO ? '凝视' : '主动推扫',
+  };
+}
+
 export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
   // 动作时间轴（4.6）：时序基准 = TCA（最近过顶点，即 overpass），而非窗口起点。
   // 低轨卫星地面轨迹速度 ~7.5km/s，成像中点必须对准 TCA，否则指向误差达数百公里。
@@ -486,7 +514,7 @@ export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
     mk('姿态机动', slewTime, { rollDeg: round1(slew) }),
     mk('姿态稳定', stabilize),
     mk('开机预热', warmup),
-    mk('成像', imaging, { gain: '自动', integrationMs: 1200, compression: 2.5, strip }),
+    mk('成像', imaging, buildImagingParams(plan, strip, imaging)),
     mk('关机', 1),
   ];
   commands.forEach((c, i) => { c.seq = i + 1; });
@@ -550,6 +578,9 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
   const { commands, timeline } = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
   // 测控弧段：真实站星几何计算（站-星仰角≥5°），选成像开始前最后一个可用弧段作为上注弧段
   const passes = computeStationPasses(sat, plan.windowStart, plan.windowEnd);
+  // 数传窗口：成像结束后的第一个过站弧段（成像数据下传），无则标注"待下一圈数传"
+  const imgEndMs = new Date(timeline.imagingEndIso).getTime();
+  const downlinkPass = passes.find(p => p.arcStart >= imgEndMs) ?? null;
   const uplinkPass = pickUplinkPass(passes, timeline.imagingStartIso);
   // 参数包（T/CARSA 3-2022 指令文件要素）：卫星标识、测控弧段、指令序列、几何参数、任务上下文
   const paramPack = {
@@ -567,6 +598,11 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
     imagingCenter: timeline.imagingCenterIso, alignedToTca: timeline.alignedToTca,
     slewDeg: planSlew,
     target: strips[0],
+    stripDirection: '顺轨推扫（轨道飞行方向）',
+    downlinkPass: downlinkPass ? {
+      station: downlinkPass.station, arcStart: new Date(downlinkPass.arcStart).toISOString(),
+      arcEnd: new Date(downlinkPass.arcEnd).toISOString(), maxElDeg: downlinkPass.maxElDeg,
+    } : null,
     commands,
   };
   const validation = validateCommands(commands, sat, { ...plan, sequenceStartIso: timeline.sequenceStartIso });
