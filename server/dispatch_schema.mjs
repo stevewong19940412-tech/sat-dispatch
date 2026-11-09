@@ -208,15 +208,26 @@ CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
 }
 
 export function nextTaskNo() {
+  // 用当日最大序号+1（count 会在删号后产生重复）。删号重建/并发场景安全。
   const d = new Date();
   const ymd = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-  const seq = db.prepare("SELECT count(*) c FROM tasks WHERE taskNo LIKE ?").get(`RSBH-${ymd}-%`).c + 1;
-  return `RSBH-${ymd}-${String(seq).padStart(3,'0')}`;
+  const rows = db.prepare("SELECT taskNo FROM tasks WHERE taskNo LIKE ?").all(`RSBH-${ymd}-%`);
+  let maxSeq = 0;
+  for (const r of rows) {
+    const n = parseInt(r.taskNo.split('-')[2], 10);
+    if (n > maxSeq) maxSeq = n;
+  }
+  return `RSBH-${ymd}-${String(maxSeq + 1).padStart(3,'0')}`;
 }
 
 export function nextOrderNo() {
   const d = new Date();
   const ymd = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-  const seq = db.prepare("SELECT count(*) c FROM orders WHERE orderNo LIKE ?").get(`PO-${ymd}-%`).c + 1;
-  return `PO-${ymd}-${String(seq).padStart(3,'0')}`;
+  const rows = db.prepare("SELECT orderNo FROM orders WHERE orderNo LIKE ?").all(`PO-${ymd}-%`);
+  let maxSeq = 0;
+  for (const r of rows) {
+    const n = parseInt(r.orderNo.split('-')[2], 10);
+    if (n > maxSeq) maxSeq = n;
+  }
+  return `PO-${ymd}-${String(maxSeq + 1).padStart(3,'0')}`;
 }
