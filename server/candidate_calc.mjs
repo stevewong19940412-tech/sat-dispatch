@@ -112,9 +112,9 @@ export function computeVisibleWindows(sat, strip, opts) {
     const visible = dKm <= maxOffKm && (sat.category === 'weather' || sunEl >= minElevSunDeg || sat.subCategory === 'sar');
     if (visible && !inWin) {
       inWin = true; winStart = p.t;
-      best = { t: p.t, dKm, slewDeg: Math.asin(Math.min(1, dKm / altKm)) * 180 / Math.PI };
+      best = { t: p.t, dKm, slewDeg: Math.atan(dKm / altKm) * 180 / Math.PI };
     } else if (visible && inWin) {
-      if (dKm < best.dKm) best = { t: p.t, dKm, slewDeg: Math.asin(Math.min(1, dKm / altKm)) * 180 / Math.PI };
+      if (dKm < best.dKm) best = { t: p.t, dKm, slewDeg: Math.atan(dKm / altKm) * 180 / Math.PI };
     } else if (!visible && inWin) {
       inWin = false;
       if (best && (best.t - winStart) >= 0) {
@@ -155,14 +155,28 @@ export function computeVisibleWindows(sat, strip, opts) {
       if (vis && p.t > fEnd) fEnd = p.t;
     }
     // TCA 时刻精确侧摆（弧长/地心角模型）
-    const pTca = fine.find(p => p.t === tcaT) || sampleTrack(sat, new Date(tcaT), 0.017, 1)[0];
-    const slew = Math.asin(Math.min(1, tcaD / altKm)) * 180 / Math.PI;
+    const slew = Math.atan(tcaD / altKm) * 180 / Math.PI;
+    // 成像覆盖窗：传感器幅宽半宽内才算"能拍到"（直控口径）。
+    // 幅宽按型号真实配置查 DEFAULT_CAPS（GAOFEN 14km / JILIN 12km / SUPERVIEW 12km / ZIYUAN 30km / FENGYUN 500km…）
+    const series = Object.keys(DEFAULT_CAPS).find(k => sat.name?.toUpperCase().startsWith(k)) ?? '';
+    const caps = series ? DEFAULT_CAPS[series] : null;
+    const footprintHalfKm = (caps?.swathKm ?? 14) / 2;
+    let imgWinStart = null, imgWinEnd = null;
+    for (const p of fine) {
+      const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
+      if (dKm <= footprintHalfKm) {
+        if (imgWinStart === null) imgWinStart = p.t;
+        imgWinEnd = p.t;
+      }
+    }
     return {
-      start: fStart, end: fEnd,
-      overpass: tcaT,            // 精确 TCA（最近过顶点）
-      minDistKm: tcaD,           // 精确最小距离
-      slewDeg: slew,             // TCA 时刻精确侧摆
-      refined: true,             // 供下游识别已精化
+      start: fStart, end: fEnd,          // 姿态可及窗（可见弧段）
+      imgWinStart: imgWinStart,          // 成像覆盖窗起点（幅宽内；null=整个过境幅宽都罩不住目标）
+      imgWinEnd: imgWinEnd,              // 成像覆盖窗终点
+      overpass: tcaT,                    // 精确 TCA（最近过顶点）
+      minDistKm: tcaD,                   // 精确最小距离
+      slewDeg: slew,                     // TCA 时刻精确侧摆（atan 几何）
+      refined: true,
     };
   });
   return refined;

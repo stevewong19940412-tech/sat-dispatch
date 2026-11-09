@@ -173,7 +173,22 @@ CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
     db.exec("ALTER TABLE candidates ADD COLUMN cloudSource TEXT DEFAULT 'simulated'");
     console.log("[schema] candidates.cloudSource 列已自动迁移");
   }
+  const cndCols = db.prepare("PRAGMA table_info(candidates)").all().map(c => c.name);
+  if (!cndCols.includes("imgWinStart")) {
+    db.exec("ALTER TABLE candidates ADD COLUMN imgWinStart TEXT");
+    db.exec("ALTER TABLE candidates ADD COLUMN imgWinEnd TEXT");
+    console.log("[schema] candidates.imgWin* 列已自动迁移");
+  }
   const dpCols = db.prepare("PRAGMA table_info(directPlans)").all().map(c => c.name);
+  if (!dpCols.includes("sequenceStart")) {
+    db.exec("ALTER TABLE directPlans ADD COLUMN sequenceStart TEXT");
+    console.log("[schema] directPlans.sequenceStart 列已自动迁移");
+  }
+  if (!dpCols.includes("imgWinStart")) {
+    db.exec("ALTER TABLE directPlans ADD COLUMN imgWinStart TEXT");
+    db.exec("ALTER TABLE directPlans ADD COLUMN imgWinEnd TEXT");
+    console.log("[schema] directPlans.imgWin* 列已自动迁移");
+  }
   if (!dpCols.includes("timeline")) {
     db.exec("ALTER TABLE directPlans ADD COLUMN timeline TEXT");
     console.log("[schema] directPlans.timeline 列已自动迁移");

@@ -76,7 +76,7 @@ dispatchApi.get("/tasks/:id", (req, res) => {
   if (!t) return res.status(404).json({ error: 'task not found' });
   t.geom = JSON.parse(t.geom);
   t.rankings = db.prepare(`
-    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.cloudSource, c.orbitGrade, c.stripIdx, c.stripCount
+    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.cloudSource, c.orbitGrade, c.stripIdx, c.stripCount, c.minDistKm, c.imgWinStart, c.imgWinEnd
     FROM rankings r JOIN candidates c ON c.id = r.candidateId
     WHERE r.taskId=? ORDER BY r.rank LIMIT 30`).all(t.id);
   t.orders = db.prepare("SELECT * FROM orders WHERE taskId=? ORDER BY id DESC").all(t.id);
@@ -118,8 +118,8 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
 
   db.prepare("DELETE FROM candidates WHERE taskId=?").run(task.id);
   const ins = db.prepare(`INSERT INTO candidates (taskId,stripIdx,stripCount,satNoradId,satName,company,
-      windowStart,windowEnd,overpassTime,slewDeg,availability,cloudFc,orbitGrade,filtered,filterReason,validRes, cloudSource)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?)`);
+      windowStart,windowEnd,overpassTime,slewDeg,availability,cloudFc,orbitGrade,filtered,filterReason,validRes, cloudSource, minDistKm, imgWinStart, imgWinEnd)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
   const winStartT = new Date(task.windowStart).getTime();
   const leadDays = Math.max(0, (winStartT - tCreated.getTime()) / 86400000);
@@ -150,7 +150,10 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           new Date(w.start).toISOString(), new Date(w.end).toISOString(),
           overpass.toISOString(), Math.round(w.slewDeg * 10) / 10,
           Math.round(availability * 10) / 10, Math.round(cloud * 1000) / 1000,
-          '高', pass ? 0 : 1, pass ? null : reasons.join('；'), Math.round(validRes * 100) / 100, cloudSrc);
+          '高', pass ? 0 : 1, pass ? null : reasons.join('；'), Math.round(validRes * 100) / 100, cloudSrc,
+          Math.round(w.minDistKm * 10) / 10,
+          w.imgWinStart ? new Date(w.imgWinStart).toISOString() : null,
+          w.imgWinEnd ? new Date(w.imgWinEnd).toISOString() : null);
         if (pass) inserted++;
         anyInserted = true;
         if (inserted > 200) break; // 上限保护
@@ -187,7 +190,7 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   const ranking = db.prepare(`
-    SELECT r.*, c.satName, c.company, c.satNoradId, c.overpassTime, c.windowStart, c.windowEnd, c.availability
+    SELECT r.*, c.satName, c.company, c.satNoradId, c.overpassTime, c.windowStart, c.windowEnd, c.availability, c.minDistKm, c.imgWinStart, c.imgWinEnd
     FROM rankings r JOIN candidates c ON c.id=r.candidateId
     WHERE r.taskId=? AND c.filtered=0 ORDER BY r.rank`).all(task.id);
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });
@@ -197,9 +200,9 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
   if (channel === '直控') {
     // R1 应急 → 创建直控执行方案（待值班确认）
     const top = ranking[0];
-    const r = db.prepare(`INSERT INTO directPlans (taskId,satNoradId,satName,company,windowStart,windowEnd,overpassTime,status)
-      VALUES (?,?,?,?,?,?,?, '待确认')`).run(task.id, top.satNoradId, top.satName, top.company,
-      top.windowStart, top.windowEnd, top.overpassTime);
+    const r = db.prepare(`INSERT INTO directPlans (taskId,satNoradId,satName,company,windowStart,windowEnd,overpassTime,imgWinStart,imgWinEnd,status)
+      VALUES (?,?,?,?,?,?,?,?,?, '待确认')`).run(task.id, top.satNoradId, top.satName, top.company,
+      top.windowStart, top.windowEnd, top.overpassTime, top.imgWinStart, top.imgWinEnd);
     db.prepare("UPDATE tasks SET status='直控执行中' WHERE id=?").run(task.id);
     return res.json({ channel, rule, planId: r.lastInsertRowid, topRank: top });
   }
@@ -416,13 +419,18 @@ export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
   const slewTime = Math.abs(slew) / omegaMax + omegaMax / alphaMax; // 机动时长公式
   const stabilize = 3.0;   // 稳定 s
   const warmup = 5.0;      // 开机预热 s
-  // 成像时长：以成像中点对准 TCA 反推——成像时长受任务窗与 TCA 两侧裕度约束，
-  // 默认 20s（直控典型条带时长），不超过 TCA 到窗两侧的可用时间
+  // 成像时长：以「成像覆盖窗」（幅宽半宽内能拍到目标的秒级区间）为准，
+  // 不再按窗口长×0.6 或固定值——GAOFEN-14 近正过顶时覆盖窗可能只有 1~5s，
+  // 拍 20s 会飞出幅宽 300km。成像中点对准 TCA，时长=覆盖窗时长（保底 1s，封顶 20s）。
   const w0 = new Date(windowStart).getTime();
   const w1 = new Date(windowEnd).getTime();
+  const hasImgWin = plan.imgWinStart && plan.imgWinEnd;
+  const imgWinSec = hasImgWin
+    ? Math.max(1, Math.round((new Date(plan.imgWinEnd) - new Date(plan.imgWinStart)) / 1000))
+    : 10;                                              // 无覆盖窗（幅宽罩不住目标）时保守取 10s，校验器会驳回
   const beforeTca = Math.max(0, tca - w0);           // TCA 前可用秒数
   const afterTca = Math.max(0, w1 - tca);            // TCA 后可用秒数
-  const imaging = Math.max(8, Math.min(20, Math.floor(Math.min(beforeTca + afterTca, 60))));
+  const imaging = Math.max(1, Math.min(imgWinSec, Math.floor(beforeTca + afterTca), 20));
   // 相邻动作间最小转换间隔 1s（校验器要求 ≥0.5s）
   const gap = 1.0;
   // 时间轴以 TCA 为基准（startOffset 相对 TCA，可为负=提前）
@@ -475,6 +483,22 @@ export function validateCommands(commands, sat, plan) {
   const imgCmd = commands.find(c => c.action === '成像');
   if (!imgCmd) errors.push('缺少成像动作');
   if (imgCmd && (imgCmd.param.integrationMs <= 0 || imgCmd.param.compression <= 0)) errors.push('成像参数非法');
+  // 指向对准校验（4.6）：成像中点必须落在 TCA 的成像覆盖窗内（±3s 容差），
+  // 否则"时序自洽但拍不到目标"。plan.overpassTime + imgWin* 为判据。
+  if (imgCmd && plan?.overpassTime) {
+    const tca = new Date(plan.overpassTime).getTime();
+    const seqStart = new Date(plan.sequenceStartIso ?? plan.windowStart).getTime();
+    const imgStart = seqStart + imgCmd.startOffset * 1000;
+    const imgCenter = imgStart + imgCmd.duration * 1000 / 2;
+    if (!plan.imgWinStart || !plan.imgWinEnd) {
+      errors.push('幅宽不覆盖：整个过境弧段内传感器幅宽均罩不住目标，此方案不能成像，请改派其他过顶更近的卫星');
+    }
+    const winS = plan.imgWinStart ? new Date(plan.imgWinStart).getTime() - 3000 : tca - imgCmd.duration * 500;
+    const winE = plan.imgWinEnd ? new Date(plan.imgWinEnd).getTime() + 3000 : tca + imgCmd.duration * 500;
+    if (imgCenter < winS || imgCenter > winE) {
+      errors.push(`指向偏差：成像中点偏离覆盖窗 ${Math.round(Math.abs(imgCenter - tca) / 1000)}s，不能拍到目标`);
+    }
+  }
   return { pass: errors.length === 0, errors, totalDuration: total };
 }
 
@@ -486,9 +510,9 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
   const strips = normalizeTaskStrips(task, 12);
   const planSlew = plan.slewDeg ?? 15;
   const { commands, timeline } = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
-  const validation = validateCommands(commands, sat, plan);
-  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, status=?, updatedAt=datetime('now') WHERE id=?")
-    .run(JSON.stringify(commands), JSON.stringify(validation), JSON.stringify(timeline),
+  const validation = validateCommands(commands, sat, { ...plan, sequenceStartIso: timeline.sequenceStartIso });
+  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, sequenceStart=?, status=?, updatedAt=datetime('now') WHERE id=?")
+    .run(JSON.stringify(commands), JSON.stringify(validation), JSON.stringify(timeline), timeline.sequenceStartIso,
       validation.pass ? '指令已生成' : '校验驳回', plan.id);
   res.json({ commands, validation, timeline });
 });
