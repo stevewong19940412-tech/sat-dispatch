@@ -56,7 +56,7 @@ export default function SatelliteDetail({ sat, onClose, onCreateMission }) {
       <div style={{ padding: "10px 14px", borderTop: "1px solid var(--border)" }}>
         <button className="btn" style={{ width: "100%" }}
           onClick={() => onCreateMission(detail)}>
-          指派此星 → 新建任务
+          以此星参考 → 建调度任务
         </button>
       </div>
     </div>

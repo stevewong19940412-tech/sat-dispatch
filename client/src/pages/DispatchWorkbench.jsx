@@ -426,7 +426,7 @@ function CompaniesTab({ companies }) {
 // ─── 新建任务弹窗 ─────────────────────────────────────────────────────────
 function NewTaskModal({ onClose, onCreated, aoiPrefill }) {
   const [form, setForm] = useState({
-    taskName: aoiPrefill ? `AOI圈选任务 (${aoiPrefill.lat.toFixed(2)},${aoiPrefill.lon.toFixed(2)})` : '',
+    taskName: aoiPrefill ? (aoiPrefill.note ? `${aoiPrefill.note} 参考点` : `AOI圈选任务 (${aoiPrefill.lat.toFixed(2)},${aoiPrefill.lon.toFixed(2)})`) : '',
     targetName: aoiPrefill ? `AOI 圆心 ${aoiPrefill.lat.toFixed(2)}°,${aoiPrefill.lon.toFixed(2)}° r${aoiPrefill.radiusKm}km` : '',
     targetType: '城区',
     geomType: 'point',

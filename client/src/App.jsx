@@ -160,24 +160,6 @@ export default function App() {
     });
   }, [showRings]);
 
-  // 火点/风场
-  useEffect(() => {
-    if (!envLayerRef.current) return;
-    if (showFire) {
-      api("/layers/fire").then(data => {
-        if (data?.points?.length) envLayerRef.current.showFireHotspots(data.points);
-      }).catch(() => {});
-    } else envLayerRef.current.clearFire();
-  }, [showFire]);
-
-  useEffect(() => {
-    if (!envLayerRef.current) return;
-    if (showWind) {
-      api("/layers/wind").then(data => {
-        if (data?.points?.length) envLayerRef.current.showWindField(data.points);
-      }).catch(() => {});
-    } else envLayerRef.current.clearWind();
-  }, [showWind]);
 
   // ─── 点击拾取卫星 ───
   useEffect(() => {
@@ -286,17 +268,8 @@ export default function App() {
             onClick={() => setWorkbench(true)}>
             调度工作台
           </button>
-          <button className="btn secondary" style={{ padding: "4px 12px" }}
-            onClick={() => { setMissionsOpen(true); setMissionsMinimized(false); }}
-            title="观测计划档案（底座功能）">
-            观测档案
-          </button>
           <button className="btn" style={{ padding: "4px 12px" }} onClick={() => setAgentVisible(!agentVisible)}>
             AI 下单助手
-          </button>
-          <button className="btn" style={{ padding: "4px 12px" }}
-            onClick={() => { setEditingMission(null); setShowMissionForm(true); }}>
-            + 新建任务
           </button>
         </div>
       </div>
@@ -370,12 +343,7 @@ export default function App() {
             <div className="layer-row" onClick={() => setShowTrack(!showTrack)}>
               星下点轨迹 <span className={`toggle ${showTrack ? "on" : ""}`} />
             </div>
-            <div className="layer-row" onClick={() => setShowFire(!showFire)}>
-              火点热区（示例） <span className={`toggle ${showFire ? "on" : ""}`} />
-            </div>
-            <div className="layer-row" onClick={() => setShowWind(!showWind)}>
-              海面风场（示例） <span className={`toggle ${showWind ? "on" : ""}`} />
-            </div>
+
           </div>
         </div>
 
@@ -428,10 +396,9 @@ export default function App() {
             sat={selectedSat}
             onClose={() => { setSelectedSat(null); satLayerRef.current?.clearHighlight(); trackLayerRef.current?.clear(); }}
             onCreateMission={(sat) => {
-              setEditingMission(null);
-              setShowMissionForm(true);
-              // 预设指派该卫星
-              window.__prefillAssign = [sat.noradId];
+              // 调度语义：以该卫星星下点为参考打开调度工作台（卫星选择由调度算法决定，非人工指派）
+              setAoiPrefill({ lat: sat.lat ?? 0, lon: sat.lon ?? 0, radiusKm: 50, note: `参考卫星 ${sat.name} (NORAD ${sat.noradId})` });
+              setWorkbench(true);
             }}
           />
         </div>
@@ -445,17 +412,7 @@ export default function App() {
         <span className="hud-chip">拖动旋转 · 滚轮缩放 · 点击卫星查看档案</span>
       </div>
 
-      {/* 任务抽屉 */}
-      {missionsOpen && (
-        <MissionsDrawer
-          minimized={missionsMinimized}
-          onToggle={() => setMissionsMinimized(!missionsMinimized)}
-          onClose={() => setMissionsOpen(false)}
-          version={missionsVersion}
-          onEdit={(m) => { setEditingMission(m); setShowMissionForm(true); }}
-          positions={positions}
-        />
-      )}
+
 
       {/* 任务表单 */}
       {showMissionForm && (
