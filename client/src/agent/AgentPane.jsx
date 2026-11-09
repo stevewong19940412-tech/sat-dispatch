@@ -206,7 +206,7 @@ export function AgentPane({ visible, onClose, getContext }) {
 
   if (!visible) return null;
 
-  return (
+  const paneBody = (
     <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 350, display: "flex" }}>
       <div className="blade-resizer" onPointerDown={startResize} onDoubleClick={() => setChatWidth(400)}
         role="separator" aria-orientation="vertical" tabIndex={0} />
@@ -275,6 +275,8 @@ export function AgentPane({ visible, onClose, getContext }) {
       </div>
     </div>
   );
+
+  return client ? <BladeProvider client={client}>{paneBody}</BladeProvider> : paneBody;
 }
 
 function SettingsModal({ models, selectedModel, onSelectModel, onClose }) {

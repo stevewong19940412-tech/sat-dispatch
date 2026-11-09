@@ -7,9 +7,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.CLIENT_PORT || "5173", 10);
 const API_PORT = process.env.API_PORT || "8600";
 
+function removeAgentPreload() {
+  return {
+    name: "remove-agent-preload",
+    closeBundle() {
+      const fs = require("fs");
+      const path = "client/dist/index.html";
+      let html = fs.readFileSync(path, "utf-8");
+      html = html.replace(/<link rel="modulepreload"[^>]*href="\/assets\/agent-[^"]*"[^>]*>\n?/g, "");
+      fs.writeFileSync(path, html);
+    }
+  };
+}
+
 export default defineConfig({
   root: resolve(__dirname, "client"),
-  plugins: [react()],
+  plugins: [ removeAgentPreload(),react()],
   server: {
     host: "0.0.0.0",
     port: PORT,
@@ -22,6 +35,13 @@ export default defineConfig({
     },
   },
   build: {
+    modulePreload: { polyfill: false },
+    rollupOptions: {
+      output: {
+        // agent chunk 按需加载：禁用动态 import 的预取提示（首屏不拉 1MB SDK）
+        experimental: {}
+      }
+    },
     outDir: resolve(__dirname, "client/dist"),
     chunkSizeWarningLimit: 1500,
     rollupOptions: {

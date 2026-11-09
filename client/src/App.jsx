@@ -1,5 +1,5 @@
 // App.jsx — 遥感卫星任务规划系统主界面
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { createScene, SatelliteLayer, TrackLayer, AoiLayer, EnvLayer, ORBIT_RINGS } from "./scene3d.js";
 import {
   CATEGORY_META, CATEGORY_ZH, MISSION_STATUS_ZH, MISSION_PRIORITY_ZH, STATUS_FLOW,
@@ -10,7 +10,8 @@ import MissionsDrawer from "./components/MissionsDrawer.jsx";
 import MissionForm from "./components/MissionForm.jsx";
 import DispatchWorkbench from "./pages/DispatchWorkbench.jsx";
 import { useLiveStream } from "./hooks/useLiveStream.js";
-import { AgentPane, BladeWrapper } from "./agent/AgentPane.jsx";
+// AgentPane（含 1MB 的 Blade SDK）改为按需加载：点"AI 下单助手"才下载，首屏提速
+const AgentPane = React.lazy(() => import("./agent/AgentPane.jsx").then(m => ({ default: m.AgentPane })));
 
 export default function App() {
   const containerRef = useRef(null);
@@ -57,6 +58,7 @@ export default function App() {
   // AOI 圈选上下文（交给 AI 建任务）
   const [aoiContext, setAoiContext] = useState(null);
   const [agentVisible, setAgentVisible] = useState(false);
+  const [agentLoading, setAgentLoading] = useState(false);
 
   const groupColors = useMemo(() => {
     const m = {};
@@ -242,7 +244,7 @@ export default function App() {
 
   // ─── 渲染 ───
   return (
-    <BladeWrapper>
+    
     <>
       {/* 三维容器 */}
       <div ref={containerRef} style={{ position: "fixed", inset: 0, cursor: aoiMode ? "crosshair" : "default" }} />
@@ -426,7 +428,7 @@ export default function App() {
         />
       )}
       {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
-      <AgentPane
+      <Suspense fallback={null}><AgentPane
         visible={agentVisible}
         onClose={() => setAgentVisible(false)}
         getContext={() => ({
@@ -435,8 +437,8 @@ export default function App() {
           aoiSelection: aoiContext,
           timestamp: new Date().toISOString(),
         })}
-      />
+       /></Suspense>
     </>
-    </BladeWrapper>
+    
   );
 }
