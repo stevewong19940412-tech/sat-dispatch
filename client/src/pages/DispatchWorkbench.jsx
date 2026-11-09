@@ -90,10 +90,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   };
 
   const deleteTask = async (taskId) => {
-    if (!confirm('确认删除该任务单？将同时删除其候选、排序与关联订单，不可恢复。')) return;
     try {
       await api(`/dispatch/tasks/${taskId}`, { method: 'DELETE' });
-      setMsg({ ok: true, text: '任务单已删除' });
+      setMsg({ ok: true, text: '任务单已删除（候选/排序/关联订单已级联清理）' });
       if (selected?.id === taskId) setSelected(null);
       await load();
     } catch (e) { setMsg({ ok: false, text: e.message }); }
@@ -144,7 +143,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 
       <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}>
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
-          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} />}
+          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
         {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
@@ -157,7 +156,14 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 }
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
-function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder }) {
+function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask }) {
+  // 两段式删除确认：第一次点击进入"待确认"态（3秒后自动还原）
+  const [pendingDelete, setPendingDelete] = useState(null);
+  useEffect(() => {
+    if (!pendingDelete) return;
+    const t = setTimeout(() => setPendingDelete(null), 3000);
+    return () => clearTimeout(t);
+  }, [pendingDelete]);
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
@@ -182,7 +188,13 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                   <button className="btn secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); openTask(t.id); }}>详情</button>
                   {['待派单', '挂任务池'].includes(t.status) && (
                     <button className="btn danger" style={{ padding: '2px 8px', fontSize: 11 }}
-                      onClick={e => { e.stopPropagation(); deleteTask(t.id); }}>删除</button>
+                      onClick={e => {
+                        e.stopPropagation();
+                        if (pendingDelete === t.id) { setPendingDelete(null); deleteTask(t.id); }
+                        else setPendingDelete(t.id);
+                      }}>
+                      {pendingDelete === t.id ? '确认删除?' : '删除'}
+                    </button>
                   )}
                 </td>
               </tr>
