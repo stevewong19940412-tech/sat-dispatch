@@ -69,29 +69,36 @@ export default function App() {
   // ─── 场景初始化 ───
   useEffect(() => {
     if (!containerRef.current) return;
-    const s3d = createScene(containerRef.current);
-    scene3dRef.current = s3d;
-    satLayerRef.current = new SatelliteLayer(s3d);
-    trackLayerRef.current = new TrackLayer(s3d);
-    aoiLayerRef.current = new AoiLayer(s3d);
-    envLayerRef.current = new EnvLayer(s3d);
-    satLayerRef.current.setGroupColors(groupColors);
-    setSceneReady(true);
-
-    // 悬停拾取（节流）
+    // 三维场景初始化让出主线程：UI 骨架先渲染可交互，地球在下一帧就绪（对齐工作台"列表先行"策略）
+    let cancelled = false;
+    const init = () => {
+      if (cancelled) return;
+      const s3d = createScene(containerRef.current);
+      scene3dRef.current = s3d;
+      satLayerRef.current = new SatelliteLayer(s3d);
+      trackLayerRef.current = new TrackLayer(s3d);
+      aoiLayerRef.current = new AoiLayer(s3d);
+      envLayerRef.current = new EnvLayer(s3d);
+      satLayerRef.current.setGroupColors(groupColors);
+      setSceneReady(true);
+    };
+    const raf = requestAnimationFrame(() => setTimeout(init, 0));
+    // 悬停拾取（节流；场景就绪前静默跳过）
     let lastMove = 0;
     const onMove = (e) => {
+      if (!scene3dRef.current) return;
       const now = Date.now();
       if (now - lastMove < 60) return;
       lastMove = now;
-      const geo = s3d.pickGlobe(e.clientX, e.clientY);
-      setCursorGeo(geo);
+      try { setCursorGeo(scene3dRef.current.pickGlobe(e.clientX, e.clientY)); } catch {}
     };
     const container = containerRef.current;
     container.addEventListener("mousemove", onMove);
     return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
       container.removeEventListener("mousemove", onMove);
-      s3d.dispose();
+      scene3dRef.current?.dispose?.();
     };
   }, [groupColors]);
 
