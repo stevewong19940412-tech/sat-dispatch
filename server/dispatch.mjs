@@ -63,6 +63,13 @@ dispatchApi.post("/tasks", (req, res) => {
   res.json({ ...task, id: r.lastInsertRowid, status: '待派单' });
 });
 
+// AI 建单联动：最近 3 分钟内由 AI 创建的任务（供工作台自动打开）
+dispatchApi.get("/latest", (req, res) => {
+  const row = db.prepare(`SELECT id FROM tasks WHERE source='对话下单'
+    AND createdAt >= datetime('now', '-3 minutes') ORDER BY id DESC LIMIT 1`).get();
+  res.json({ taskId: row?.id ?? null });
+});
+
 dispatchApi.get("/tasks", (req, res) => {
   const { status, limit = 100 } = req.query;
   const rows = status
@@ -170,8 +177,18 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
 
 // ─── 派单执行（4.5）──────────────────────────────────────────────────────
 // R1~R6 分流判定
-function decideChannel(task, ranking) {
-  if (task.isEmergency) return { channel: '直控', rule: 'R1 应急任务' };
+function decideChannel(task, ranking, skipR1 = false) {
+  // R1 直控：应急 且 时效≤24h（双条件）。仅标"应急"但时效宽的任务（如 40h）降级走 R2~R6，
+  // 避免 AI/录入把"尽快"写成应急就绕过询价与人工裁定。
+  if (!skipR1) {
+    if (task.isEmergency && task.timelinessHours && task.timelinessHours <= 24)
+      return { channel: '直控', rule: 'R1 应急且时效≤24h' };
+    if (task.isEmergency) {
+      // 降级：递归跳过 R1 重新判定，并标注降级原因
+      const downgraded = decideChannel(task, ranking, true);
+      return { ...downgraded, rule: '应急但时效>24h，降级正常分流（未走直控）｜' + downgraded.rule };
+    }
+  }
   const companies = [...new Set(ranking.map(r => r.company))];
   if (companies.length === 1) return { channel: '指派', rule: 'R2 候选公司仅一家' };
   // R3 成像要求与时效达到"要求高"：分辨率 ≤1m 且时效 ≤24h

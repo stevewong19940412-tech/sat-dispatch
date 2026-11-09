@@ -40,6 +40,21 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
     return () => clearInterval(t);
   }, [load]);
 
+  // AI 建单联动：进工作台后查最近 3 分钟内 AI 创建的任务，有则自动打开详情
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await api('/dispatch/latest');
+        if (!cancelled && d.taskId) {
+          await openTask(d.taskId);
+          setTab('tasks');
+        }
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const openTask = async (id) => {
     setSelected(await api(`/dispatch/tasks/${id}`));
   };
