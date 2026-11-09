@@ -28,6 +28,18 @@ export function validateTask(t) {
   return errors;
 }
 
+// 任务级人工确认：AI 建单默认 pendingConfirm=true（待人工确认下发），
+// 工作台点"确认下发"后才置 false 并可派发。手工录入默认 false。
+dispatchApi.post("/tasks/:id/confirm", (req, res) => {
+  const t = db.prepare("SELECT * FROM tasks WHERE id=?").get(+req.params.id);
+  if (!t) return res.status(404).json({ error: 'task not found' });
+  if (t.status !== '待派单') return res.status(400).json({ error: `状态 ${t.status} 不可确认下发` });
+  db.prepare("UPDATE tasks SET pendingConfirm=0 WHERE id=?").run(t.id);
+  db.prepare(`INSERT INTO dispatchLog (taskId, action, detail) VALUES (?, '人工确认下发', ?)`)
+    .run(t.id, req.body?.note ?? '人工确认下发任务');
+  res.json({ ok: true, status: '已确认待派发' });
+});
+
 dispatchApi.post("/tasks", (req, res) => {
   const b = req.body ?? {};
   const task = {
@@ -54,12 +66,13 @@ dispatchApi.post("/tasks", (req, res) => {
   const errors = validateTask(task);
   if (errors.length) return res.status(400).json({ error: '生成校验不通过', errors });
   task.taskNo = nextTaskNo();
+  task.pendingConfirm = (task.source === '对话下单' || req.body?.source === '对话下单') ? 1 : 0;
   const r = db.prepare(`INSERT INTO tasks (taskNo,taskName,source,targetName,targetType,geomType,geom,
       obsType,resolution,spectral,windowStart,windowEnd,maxCloud,maxSlewDeg,timelinessHours,
-      priority,isEmergency,taskPhase,confidence,parseNote)
+      priority,isEmergency,taskPhase,confidence,parseNote,pendingConfirm)
     VALUES (@taskNo,@taskName,@source,@targetName,@targetType,@geomType,@geom,
       @obsType,@resolution,@spectral,@windowStart,@windowEnd,@maxCloud,@maxSlewDeg,@timelinessHours,
-      @priority,@isEmergency,@taskPhase,@confidence,@parseNote)`).run(task);
+      @priority,@isEmergency,@taskPhase,@confidence,@parseNote,@pendingConfirm)`).run(task);
   res.json({ ...task, id: r.lastInsertRowid, status: '待派单' });
 });
 
@@ -181,8 +194,8 @@ function decideChannel(task, ranking, skipR1 = false) {
   // R1 直控：应急 且 时效≤24h（双条件）。仅标"应急"但时效宽的任务（如 40h）降级走 R2~R6，
   // 避免 AI/录入把"尽快"写成应急就绕过询价与人工裁定。
   if (!skipR1) {
-    if (task.isEmergency && task.timelinessHours && task.timelinessHours <= 24)
-      return { channel: '直控', rule: 'R1 应急且时效≤24h' };
+    if (task.isEmergency && (!task.timelinessHours || task.timelinessHours <= 24))
+      return { channel: '直控', rule: task.timelinessHours ? 'R1 应急且时效≤24h' : 'R1 应急（未填时效，视为最高紧迫）' };
     if (task.isEmergency) {
       // 降级：递归跳过 R1 重新判定，并标注降级原因
       const downgraded = decideChannel(task, ranking, true);
@@ -211,6 +224,7 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
     FROM rankings r JOIN candidates c ON c.id=r.candidateId
     WHERE r.taskId=? AND c.filtered=0 ORDER BY r.rank`).all(task.id);
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });
+  if (task.pendingConfirm) return res.status(400).json({ error: '任务待人工确认下发，请先在工作台点击「确认下发」' });
 
   const { channel, rule } = decideChannel(task, ranking);
 
@@ -527,21 +541,44 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
   const strips = normalizeTaskStrips(task, 12);
   const planSlew = plan.slewDeg ?? 15;
   const { commands, timeline } = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
+  // 参数包（T/CARSA 3-2022 指令文件要素）：卫星标识、测控弧段、指令序列、几何参数、任务上下文
+  const paramPack = {
+    satNoradId: plan.satNoradId, satName: plan.satName,
+    groundStation: '喀什站',                       // 测控上注站（模拟弧段以喀什为例）
+    window: { start: plan.windowStart, end: plan.windowEnd },
+    tca: timeline.tcaIso, sequenceStart: timeline.sequenceStartIso,
+    imagingStart: timeline.imagingStartIso, imagingEnd: timeline.imagingEndIso,
+    imagingCenter: timeline.imagingCenterIso, alignedToTca: timeline.alignedToTca,
+    slewDeg: planSlew,
+    target: strips[0],
+    commands,
+  };
   const validation = validateCommands(commands, sat, { ...plan, sequenceStartIso: timeline.sequenceStartIso });
-  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, sequenceStart=?, status=?, updatedAt=datetime('now') WHERE id=?")
-    .run(JSON.stringify(commands), JSON.stringify(validation), JSON.stringify(timeline), timeline.sequenceStartIso,
-      validation.pass ? '指令已生成' : '校验驳回', plan.id);
-  res.json({ commands, validation, timeline });
+  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, sequenceStart=?, paramPack=?, status=?, updatedAt=datetime('now') WHERE id=?")
+    .run(JSON.stringify(commands), JSON.stringify(validation), JSON.stringify(timeline), timeline.sequenceStartIso, JSON.stringify(paramPack),
+      validation.pass ? '待核验下发' : '校验驳回', plan.id);
+  res.json({ commands, validation, timeline, paramPack });
 });
 
 dispatchApi.post("/plans/:id/confirm", (req, res) => {
-  const { stage } = req.body ?? {}; // 方案确认 | 上注确认
+  const { stage, checklist } = req.body ?? {}; // stage: 方案|上注；checklist: 上注前人工核验勾选
   const plan = db.prepare("SELECT * FROM directPlans WHERE id=?").get(+req.params.id);
   if (!plan) return res.status(404).json({ error: 'plan not found' });
   const map = { '方案': '方案已确认', '上注': '已上注' };
   const next = map[stage];
   if (!next) return res.status(400).json({ error: 'stage 须为 方案|上注' });
-  if (stage === '上注' && plan.status !== '指令已生成') return res.status(400).json({ error: '指令未生成或校验未通过' });
+  // 上注前强制核验（遥控作业规范：上行前阶段必须逐项确认）：
+  // 1) 时窗正确 2) 指向对准（TCA） 3) 指令校验通过 4) 卫星/弧段正确
+  if (stage === '上注') {
+    if (!['待核验下发'].includes(plan.status)) return res.status(400).json({ error: `状态 ${plan.status} 不可上注（须先生成指令并核验）` });
+    const required = ['windowOk', 'tcaAligned', 'commandsValid', 'satArcOk'];
+    const missing = required.filter(k => !checklist?.[k]);
+    if (missing.length) return res.status(400).json({ error: `上注核验未完成，缺项: ${missing.join(', ')}`, required });
+    db.prepare(`INSERT INTO dispatchLog (taskId, action, detail) VALUES (?, '上注前人工核验', ?)`)
+      .run(plan.taskId, JSON.stringify(checklist));
+  }
+  if (stage === '方案' && !['待确认', '待核验下发'].includes(plan.status))
+    return res.status(400).json({ error: `状态 ${plan.status} 不可确认方案` });
   db.prepare("UPDATE directPlans SET status=?, updatedAt=datetime('now') WHERE id=?").run(next, plan.id);
   // 模拟测控弧段与执行
   if (next === '已上注') {

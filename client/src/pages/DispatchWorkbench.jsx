@@ -21,6 +21,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   const [msg, setMsg] = useState(null);
   // 删除确认弹窗状态（主组件持有，TasksTab 通过 onRequestDelete 回调触发）
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  // 直控参数包核验弹窗（主组件持有；人工勾选核验项后确认上注）
+  const [uplinkVerify, setUplinkVerify] = useState(null);
+  const [uplinkChecklist, setUplinkChecklist] = useState({});
 
   const load = useCallback(async () => {
     // 并行拉取（原来是 5 个串行 await，最慢者拖累全部）
@@ -162,10 +165,78 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
           runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
-        {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} />}
+        {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
         {tab === 'companies' && <CompaniesTab companies={companies} />}
       </div>
+
+      {/* 直控参数包核验与上注确认弹窗（上注前人工逐项核验——遥控作业规范） */}
+      {uplinkVerify && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setUplinkVerify(null); }}>
+          <div className="modal" style={{ width: 520 }}>
+            <div className="modal-header">直控参数包核验 · {uplinkVerify.satName}
+              <button className="close-btn" style={{ marginLeft: 'auto' }} onClick={() => setUplinkVerify(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {(() => {
+                const pack = uplinkVerify.paramPack ? JSON.parse(uplinkVerify.paramPack) : null;
+                if (!pack) return <div style={{ fontSize: 12, color: 'var(--danger)' }}>参数包未生成，请先点击「计算直控参数包」。</div>;
+                return (<>
+                  <div style={{ fontSize: 12, lineHeight: 2, color: 'var(--text-main)' }}>
+                    <div>目标：{uplinkVerify.taskName || '—'}</div>
+                    <div>卫星：{pack.satName} (NORAD {pack.satNoradId}) ｜ 上注站：{pack.groundStation}</div>
+                    <div>成像窗：{pack.window.start?.slice(5, 19)} ~ {pack.window.end?.slice(5, 19)} UTC</div>
+                    <div>最近过顶（TCA）：{pack.tca?.slice(5, 19)} UTC ｜ 侧摆 {pack.slewDeg}°</div>
+                    <div>指令序列开始：{pack.sequenceStart?.slice(11, 19)} UTC（TCA 前 {(() => {
+                      const d = (new Date(pack.tca) - new Date(pack.sequenceStart)) / 1000; return Math.round(d);
+                    })()}s）</div>
+                    <div>指令序列（{pack.commands.length} 条）：</div>
+                    <table className="mission-table" style={{ fontSize: 10.5, margin: '4px 0 8px' }}>
+                      <thead><tr><th>#</th><th>动作</th><th>偏移</th><th>时长</th></tr></thead>
+                      <tbody>
+                        {pack.commands.map(c => (
+                          <tr key={c.seq}><td>{c.seq}</td><td>{c.action}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{c.startOffset}s</td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{c.duration}s</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {(() => {
+                      const v = uplinkVerify.validation ? JSON.parse(uplinkVerify.validation) : null;
+                      return v ? <div style={{ fontSize: 11.5, color: v.pass ? 'var(--accent)' : 'var(--danger)', marginBottom: 8 }}>
+                        独立校验：{v.pass ? '✅ 通过' : '❌ ' + v.errors.join('；')}</div> : null;
+                    })()}
+                  </div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, margin: '8px 0 6px' }}>上注前核验（逐项确认）</div>
+                  {['windowOk', 'tcaAligned', 'commandsValid', 'satArcOk'].map(k => {
+                    const label = { windowOk: '成像时窗正确（与任务要求一致）', tcaAligned: '指向对准（成像中点已对准最近过顶点）',
+                      commandsValid: '指令校验通过（时序/固存/参数合规）', satArcOk: '卫星与测控弧段正确（喀什站弧段可覆盖）' }[k];
+                    return (
+                      <label key={k} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, margin: '4px 0', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={uplinkChecklist[k] ?? false}
+                          onChange={e => setUplinkChecklist({ ...uplinkChecklist, [k]: e.target.checked })} />
+                        {label}
+                      </label>
+                    );
+                  })}
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+                    <button className="btn secondary" onClick={() => { setUplinkVerify(null); setUplinkChecklist({}); }}>取消</button>
+                    <button className="btn danger" disabled={!['windowOk', 'tcaAligned', 'commandsValid', 'satArcOk'].every(k => uplinkChecklist[k])}
+                      onClick={async () => {
+                        try {
+                          await api(`/dispatch/plans/${uplinkVerify.id}/confirm`, { method: 'POST', body: JSON.stringify({ stage: '上注', checklist: uplinkChecklist }) });
+                          setMsg({ ok: true, text: '上注完成，卫星进入直控执行' });
+                          setUplinkVerify(null); setUplinkChecklist({});
+                          await load();
+                        } catch (e) { setMsg({ ok: false, text: e.message }); }
+                      }}>确认下发上注</button>
+                  </div>
+                </>);
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 删除确认弹窗（自定义，不用原生 confirm——嵌入环境会被静默拦截） */}
       {deleteConfirm && (
@@ -252,9 +323,25 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             <div className="kv"><div className="k">时效要求</div><div className="v">{selected.timelinessHours ? `${selected.timelinessHours}h` : '—'}</div></div>
           </div>
 
+          {selected.pendingConfirm === 1 && (
+            <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 4, fontSize: 12.5,
+              background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.4)', color: 'var(--text-bright)' }}>
+              ⚠ 该任务由 AI 创建，尚未人工确认下发。请核对右侧任务要素（目标/分辨率/时间窗/云量）后确认。
+              <div style={{ marginTop: 8 }}>
+                <button className="btn" disabled={busy} onClick={async () => {
+                  try {
+                    await api(`/dispatch/tasks/${selected.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
+                    setMsg({ ok: true, text: '已确认下发，可执行候选计算与派单' });
+                    await openTask(selected.id);
+                  } catch (e) { setMsg({ ok: false, text: e.message }); }
+                }}>确认下发</button>
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, margin: '12px 0' }}>
             <button className="btn" disabled={busy} onClick={() => runCandidates(selected.id)}>① 候选计算</button>
-            <button className="btn" disabled={busy || !selected.rankings?.length} onClick={() => doDispatch(selected.id)}>② 派单分流</button>
+            <button className="btn" disabled={busy || !selected.rankings?.length || selected.pendingConfirm === 1}
+              onClick={() => doDispatch(selected.id)}>② 派单分流</button>
           </div>
           {/* 执行链路指引（状态驱动）：让 AI 下单与工作台操作无缝衔接 */}
           {selected.source === '对话下单' && (
@@ -377,7 +464,7 @@ function OrdersTab({ orders, advanceOrder }) {
 }
 
 // ─── 应急直控 Tab ─────────────────────────────────────────────────────────
-function PlansTab({ plans, planAction, busy }) {
+function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
   return (
     <div>
       {plans.length === 0 && <div style={{ textAlign: 'center', color: 'var(--text-dim)', padding: 30 }}>暂无直控方案（应急任务分流后自动生成）</div>}
@@ -420,10 +507,13 @@ function PlansTab({ plans, planAction, busy }) {
             </div>
           )}
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'generate')}>生成/重算指令包</button>
-            {p.status === '指令已生成' && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, '方案')}>① 方案确认（值班）</button>}
-            {p.status === '方案已确认' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, '上注')}>② 上注前确认 → 弧段上注</button>}
-            {p.status === '执行中' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'complete')}>③ 执行完成回写</button>}
+            <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'generate')}>
+              {p.status === '待确认' ? '① 计算直控参数包' : '重算参数包'}
+            </button>
+            {p.status === '待核验下发' && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, '方案')}>② 方案确认（值班）</button>}
+            {p.status === '方案已确认' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }}
+              onClick={() => setUplinkVerify(p)}>③ 核验参数包 → 确认上注</button>}
+            {p.status === '执行中' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'complete')}>④ 执行完成回写</button>}
           </div>
         </div>
       ))}
