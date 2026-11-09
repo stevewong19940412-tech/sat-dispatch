@@ -8,6 +8,7 @@ import {
 } from "./candidate_calc.mjs";
 import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
+import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
 import { rankTask } from "./priority_calc.mjs";
 import { solarElevationDegFor } from "./solar.mjs";
 
@@ -447,32 +448,13 @@ dispatchApi.get("/pool", (req, res) => {
 
 // ─── 应急直控（4.6）──────────────────────────────────────────────────────
 // 指令生成（规则引擎，确定性）+ 独立校验
-// 成像参数解算（敏捷卫星 TDI 推扫口径，依据 ISPRS 2024 / TDI 像移速度匹配文献）
-// 太阳高度角 → TDI 级数；轨道高度+像移速度 → 积分时间；GSD → 压缩比
+// 成像参数解算：委托 payload_specs.mjs（三路调研智能体产出的真实型号参数库）
 export function buildImagingParams(plan, strip, imagingSec) {
-  // 太阳高度角：由 candidates 精化段带下来（plan.sunElDeg），缺失时按当地上午10:30典型值 40° 估
-  const sunEl = plan.sunElDeg ?? 40;
-  const tdiStages = sunEl > 30 ? 8 : sunEl >= 10 ? 16 : 32;
-  // 像移速度匹配：地面像移速度 v = v_orbit × R/(R+h)；v_orbit ≈ 7.5 km/s（LEO），GEO 用 3.1 km/s（同步视场）
-  const altKm = plan.altKm ?? 500;
-  const isGEO = altKm > 10000;
-  const vOrbit = isGEO ? 3.1 : 7.5;
-  const vGround = vOrbit * 6371 / (6371 + altKm); // km/s
-  // 像元地面尺寸 = GSD；积分时间 = 像元地面尺寸 / 像移速度（秒）
-  const gsdM = plan.resolutionM ?? 2;
-  const integrationSec = (gsdM / 1000) / vGround;
-  // 压缩比：GSD≤1m 高细节 → 2:1；≤4m → 3:1；更粗 → 4:1
-  const compression = gsdM <= 1 ? 2 : gsdM <= 4 ? 3 : 4;
-  return {
-    gain: '自动',
-    tdiStages,
-    integrationMs: Math.round(integrationSec * 1e6) / 1000,  // ms，保留3位
-    imageMotionVelKmS: Math.round(vGround * 100) / 100,
-    compression,
-    compressionMode: 'JPEG2000',
-    strip,
-    imagingMode: isGEO ? '凝视' : '主动推扫',
-  };
+  return solveImagingParams({
+    satName: plan.satName, altKm: plan.altKm ?? 500,
+    gsdM: plan.resolutionM ?? 2, sunElDeg: plan.sunElDeg ?? 40,
+    slewDeg: plan.slewDeg ?? 0, imagingSec,
+  });
 }
 
 export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
@@ -603,6 +585,16 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
       station: downlinkPass.station, arcStart: new Date(downlinkPass.arcStart).toISOString(),
       arcEnd: new Date(downlinkPass.arcEnd).toISOString(), maxElDeg: downlinkPass.maxElDeg,
     } : null,
+    // 载荷规格与数据量/上注预算（三路调研智能体产出口径，字段带来源标注）
+    payloadSpec: getPayloadSpec(plan.satName),
+    estDataMB: (() => {
+      const img = commands.find(c => c.action === '成像');
+      return img?.param?.estDataMB ?? null;
+    })(),
+    uplinkBudget: uplinkPass ? solveUplinkBudget({
+      arcDurationSec: Math.round((uplinkPass.arcEnd - uplinkPass.arcStart) / 1000),
+      commandCount: commands.length,
+    }) : null,
     commands,
   };
   const validation = validateCommands(commands, sat, { ...plan, sequenceStartIso: timeline.sequenceStartIso });

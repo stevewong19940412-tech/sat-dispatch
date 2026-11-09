@@ -198,10 +198,14 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                       const ip = img?.param ?? {};
                       return (
                         <div style={{ fontSize: 11.5, color: 'var(--text-dim)', margin: '6px 0' }}>
-                          成像参数：{ip.imagingMode} ｜ TDI {ip.tdiStages} 级 ｜ 积分 {ip.integrationMs} ms（像移 {ip.imageMotionVelKmS} km/s 匹配）｜ 压缩 {ip.compression}:1 {ip.compressionMode}
-                          <br/>条带方向：{pack.stripDirection} ｜ 数传窗口：{pack.downlinkPass
+                          成像参数：{ip.imagingMode} ｜ TDI {ip.tdiStages} 级（{ip.tdiSource?.startsWith('real') ? '文献值' : '典型值'}）｜ 积分 {ip.integrationMs} ms（像移 {ip.imageMotionVelKmS} km/s 匹配）｜ 增益 {ip.gain} ｜ 量化 {ip.quantBits}bit
+                          <br/>压缩 {ip.compression}:1 {ip.compressionMode} ｜ 条带方向：{pack.stripDirection} ｜ 数传窗口：{pack.downlinkPass
                             ? `${pack.downlinkPass.station} ${pack.downlinkPass.arcStart?.slice(11, 19)} UTC（maxEl ${pack.downlinkPass.maxElDeg}°）`
                             : '待下一圈过站下传'}
+                          <br/>载荷：{pack.payloadSpec?.camera}（幅宽 {pack.payloadSpec?.swathKm}km，侧摆 {pack.payloadSpec?.slewMax}°）｜ 本次成像数据量估算 {ip.estDataMB} MB（{ip.estDataRows} 行）
+                          {pack.uplinkBudget && (
+                            <><br/>上注预算：弧段 {pack.uplinkBudget.budgetKB} KB ｜ 指令需 {pack.uplinkBudget.needKB} KB（压缩上注 23B/条）｜ {pack.uplinkBudget.fits ? '✅ 弧段容量足够' : '❌ 超出弧段容量'}</>
+                          )}
                         </div>
                       );
                     })()}
