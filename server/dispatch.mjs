@@ -407,21 +407,29 @@ dispatchApi.get("/pool", (req, res) => {
 // ─── 应急直控（4.6）──────────────────────────────────────────────────────
 // 指令生成（规则引擎，确定性）+ 独立校验
 export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
-  const satrec = (function () {
-    if (sat.gpJson) { try { const gp = JSON.parse(sat.gpJson); const r = satellite2json(gp); if (r) return r; } catch {} }
-    try { return null; } catch { return null; }
-  })();
-  // 动作时间轴（4.6 四层之一）：姿态机动→稳定→开机预热→成像→关机
-  const t0 = new Date(windowStart).getTime();
+  // 动作时间轴（4.6）：时序基准 = TCA（最近过顶点，即 overpass），而非窗口起点。
+  // 低轨卫星地面轨迹速度 ~7.5km/s，成像中点必须对准 TCA，否则指向误差达数百公里。
+  const tca = new Date(plan.overpass ?? plan.overpassTime ?? windowStart).getTime();
   const slew = plan.slewDeg ?? 15;
   const omegaMax = 1.0; // °/s 型号配置
   const alphaMax = 0.5; // °/s²
   const slewTime = Math.abs(slew) / omegaMax + omegaMax / alphaMax; // 机动时长公式
   const stabilize = 3.0;   // 稳定 s
   const warmup = 5.0;      // 开机预热 s
-  const imaging = Math.max(8, Math.min(60, (new Date(windowEnd) - new Date(windowStart)) / 1000 * 0.6));
+  // 成像时长：以成像中点对准 TCA 反推——成像时长受任务窗与 TCA 两侧裕度约束，
+  // 默认 20s（直控典型条带时长），不超过 TCA 到窗两侧的可用时间
+  const w0 = new Date(windowStart).getTime();
+  const w1 = new Date(windowEnd).getTime();
+  const beforeTca = Math.max(0, tca - w0);           // TCA 前可用秒数
+  const afterTca = Math.max(0, w1 - tca);            // TCA 后可用秒数
+  const imaging = Math.max(8, Math.min(20, Math.floor(Math.min(beforeTca + afterTca, 60))));
   // 相邻动作间最小转换间隔 1s（校验器要求 ≥0.5s）
   const gap = 1.0;
+  // 时间轴以 TCA 为基准（startOffset 相对 TCA，可为负=提前）
+  const preImaging = imaging / 2;                     // 成像前半段在 TCA 之前
+  const preAllSec = slewTime + gap + stabilize + gap + warmup + gap + preImaging;
+  const preAll = preAllSec * 1000;                    // 毫秒（tca 为 ms 时间戳）
+  const t0 = tca - preAll;                            // 姿态机动的绝对开始时刻
   let off = 0;
   const mk = (action, duration, param) => {
     const cmd = { seq: 0, action, startOffset: round1(off), duration: round1(duration), ...(param ? { param } : {}) };
@@ -436,7 +444,17 @@ export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
     mk('关机', 1),
   ];
   commands.forEach((c, i) => { c.seq = i + 1; });
-  return commands;
+  // 绝对时刻：供校验与上注（TCA 基准）——序列内 offset 从 mk 累计，直接复用避免单位错位
+  const imgCmd = commands.find(c => c.action === '成像');
+  const timeline = {
+    tcaIso: new Date(tca).toISOString(),
+    sequenceStartIso: new Date(t0).toISOString(),
+    imagingStartIso: new Date(t0 + imgCmd.startOffset * 1000).toISOString(),
+    imagingEndIso: new Date(t0 + (imgCmd.startOffset + imgCmd.duration) * 1000).toISOString(),
+    imagingCenterIso: new Date(t0 + (imgCmd.startOffset + imgCmd.duration / 2) * 1000).toISOString(),
+    alignedToTca: true,
+  };
+  return { commands, timeline };
 }
 function round1(x) { return Math.round(x * 10) / 10; }
 function satellite2json() { return null; }
@@ -467,12 +485,12 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
   const task = db.prepare("SELECT * FROM tasks WHERE id=?").get(plan.taskId);
   const strips = normalizeTaskStrips(task, 12);
   const planSlew = plan.slewDeg ?? 15;
-  const commands = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
+  const { commands, timeline } = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
   const validation = validateCommands(commands, sat, plan);
-  db.prepare("UPDATE directPlans SET commands=?, validation=?, status=?, updatedAt=datetime('now') WHERE id=?")
-    .run(JSON.stringify(commands), JSON.stringify(validation),
+  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, status=?, updatedAt=datetime('now') WHERE id=?")
+    .run(JSON.stringify(commands), JSON.stringify(validation), JSON.stringify(timeline),
       validation.pass ? '指令已生成' : '校验驳回', plan.id);
-  res.json({ commands, validation });
+  res.json({ commands, validation, timeline });
 });
 
 dispatchApi.post("/plans/:id/confirm", (req, res) => {

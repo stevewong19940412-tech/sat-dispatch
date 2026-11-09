@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS orders (
 
 -- 应急直控：执行方案与载荷指令包
 CREATE TABLE IF NOT EXISTS directPlans (
+  timeline TEXT,
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   taskId INTEGER NOT NULL,
   satNoradId INTEGER NOT NULL,
@@ -171,6 +172,11 @@ CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
   if (!cols.includes("cloudSource")) {
     db.exec("ALTER TABLE candidates ADD COLUMN cloudSource TEXT DEFAULT 'simulated'");
     console.log("[schema] candidates.cloudSource 列已自动迁移");
+  }
+  const dpCols = db.prepare("PRAGMA table_info(directPlans)").all().map(c => c.name);
+  if (!dpCols.includes("timeline")) {
+    db.exec("ALTER TABLE directPlans ADD COLUMN timeline TEXT");
+    console.log("[schema] directPlans.timeline 列已自动迁移");
   }
 }
 

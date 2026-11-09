@@ -127,7 +127,45 @@ export function computeVisibleWindows(sat, strip, opts) {
     windows.push({ start: winStart, end: Math.min(track[track.length-1].t, tEnd), overpass: best.t, minDistKm: best.dKm, slewDeg: best.slewDeg });
   }
   // 只保留与任务窗有交且过顶在任务窗内的
-  return windows.filter(w => w.overpass >= t0.getTime() && w.overpass <= tEnd).slice(0, 8);
+  const coarse = windows.filter(w => w.overpass >= t0.getTime() && w.overpass <= tEnd).slice(0, 8);
+
+  // ─── 秒级精化：20s 粗采样对直控指令不够（端点误差可达数百公里）───
+  // 对每个粗窗，在 [winStart-20s, winEnd+20s] 内以 1s 步长重采样，
+  // 输出精确 TCA（最近过顶点）、精确窗口边界与该时刻的精确侧摆角。
+  const refined = coarse.map(w => {
+    const rStart = w.start - 30000;
+    const rEnd = Math.min(w.end + 30000, tEnd);
+    let tcaT = null, tcaD = Infinity;
+    for (let t = rStart; t <= rEnd; t += 1000) {
+      const p = sampleTrack(sat, new Date(t), 0.02, 1)[0];
+      if (!p) continue;
+      const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
+      if (dKm < tcaD) { tcaD = dKm; tcaT = t; }
+    }
+    if (tcaT === null) return w;
+    // TCA 前后按可见判据回扫精确窗口边界（1s 步长）
+    const fine = sampleTrack(sat, new Date(Math.max(t0.getTime(), tcaT - 300000)), Math.min(10, (tEnd - tcaT) / 60000 + 10), 1)
+      .filter(p => p.t >= Math.max(t0.getTime(), tcaT - 300000) && p.t <= tEnd + 30000);
+    let fStart = tcaT, fEnd = tcaT;
+    for (const p of fine) {
+      const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
+      const sunEl = solarElevationDeg(strip.lat, strip.lon, new Date(p.t));
+      const vis = dKm <= maxOffKm && (sat.category === 'weather' || sunEl >= minElevSunDeg || sat.subCategory === 'sar');
+      if (vis && p.t < fStart) fStart = p.t;
+      if (vis && p.t > fEnd) fEnd = p.t;
+    }
+    // TCA 时刻精确侧摆（弧长/地心角模型）
+    const pTca = fine.find(p => p.t === tcaT) || sampleTrack(sat, new Date(tcaT), 0.017, 1)[0];
+    const slew = Math.asin(Math.min(1, tcaD / altKm)) * 180 / Math.PI;
+    return {
+      start: fStart, end: fEnd,
+      overpass: tcaT,            // 精确 TCA（最近过顶点）
+      minDistKm: tcaD,           // 精确最小距离
+      slewDeg: slew,             // TCA 时刻精确侧摆
+      refined: true,             // 供下游识别已精化
+    };
+  });
+  return refined;
 }
 
 // ─── 云量解算（4.3-4）：内置模拟气象场 ──────────────────────────────────
