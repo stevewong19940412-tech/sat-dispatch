@@ -435,16 +435,27 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                   公司执行包已生成：{selected.orders.map(o => `${o.orderNo}（${o.company} · ${o.channel}）`).join('、')}，要素含目标 AOI/时窗/分辨率/云量，见订单跟踪 Tab。
                 </div>
               )}
-              {/* 直控参数生成入口：用户此前提过的按钮——点后跳到直控 Tab 并生成参数包 */}
+              {/* 人工选择通道：派给公司（询价/指派）或 生成直控任务指令 */}
               {selected.status === '待派单' && (
-                <button className="btn secondary" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
-                  onClick={async () => {
-                    try {
-                      await doDispatch(selected.id);
-                      setTab('plans');
-                      setMsg({ ok: true, text: '已生成分流方案；直控方案在「直控方案」Tab 可生成参数包并核验上注' });
-                    } catch (e) { setMsg({ ok: false, text: e.message }); }
-                  }}>生成任务包并分流</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
+                    onClick={async () => {
+                      try {
+                        const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '询价' }) });
+                        setMsg({ ok: true, text: `已派给公司（${d.rule}）：${(d.inquiries ?? []).length > 0 ? '询价' + d.inquiries.length + '家 + ' : ''}主单 ${d.orderNo ?? ''}` });
+                        await openTask(selected.id);
+                      } catch (e) { setMsg({ ok: false, text: e.message }); }
+                    }}>派给公司</button>
+                  <button className="btn danger" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
+                    onClick={async () => {
+                      try {
+                        const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '直控' }) });
+                        setMsg({ ok: true, text: '直控方案已建立，去「直控方案」Tab 计算参数包并核验上注' });
+                        setTab('plans');
+                        await openTask(selected.id);
+                      } catch (e) { setMsg({ ok: false, text: e.message }); }
+                    }}>生成直控任务指令</button>
+                </div>
               )}
               {selected.status === '直控执行中' && (
                 <button className="btn secondary" style={{ padding: '3px 12px', fontSize: 11.5 }}

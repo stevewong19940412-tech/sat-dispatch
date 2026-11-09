@@ -233,7 +233,12 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });
   if (task.pendingConfirm) return res.status(400).json({ error: '任务待人工确认下发，请先在工作台点击「确认下发」' });
 
-  const { channel, rule } = decideChannel(task, ranking);
+  // 人工指定通道优先：前端「派给公司」传 channel=公司通道，「生成直控指令」传 channel=直控；
+  // 未指定时走 R1~R6 自动判定
+  const manualChannel = req.body?.channel;
+  let { channel, rule } = manualChannel
+    ? { channel: manualChannel, rule: `人工指定通道（覆盖自动判定）` }
+    : decideChannel(task, ranking);
 
   if (channel === '直控') {
     // R1 应急 → 创建直控执行方案（待值班确认）
