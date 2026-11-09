@@ -13,15 +13,12 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   const [tab, setTab] = useState('tasks'); // tasks|orders|pool|plans|companies
   const [tasks, setTasks] = useState([]);
   const [selected, setSelected] = useState(null); // 任务详情
-  const [showNew, setShowNew] = useState(false);
   const [orders, setOrders] = useState([]);
   const [plans, setPlans] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [pool, setPool] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  // AOI 圈选预填：进工作台自动弹新建任务，坐标已带
-  const [autoOpenNew, setAutoOpenNew] = useState(!!aoiPrefill);
 
   const load = useCallback(async () => {
     // 并行拉取（原来是 5 个串行 await，最慢者拖累全部）
@@ -92,6 +89,16 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
     setBusy(false);
   };
 
+  const deleteTask = async (taskId) => {
+    if (!confirm('确认删除该任务单？将同时删除其候选、排序与关联订单，不可恢复。')) return;
+    try {
+      await api(`/dispatch/tasks/${taskId}`, { method: 'DELETE' });
+      setMsg({ ok: true, text: '任务单已删除' });
+      if (selected?.id === taskId) setSelected(null);
+      await load();
+    } catch (e) { setMsg({ ok: false, text: e.message }); }
+  };
+
   const claimTask = async (taskId, company) => {
     await api(`/dispatch/pool/${taskId}/claim`, { method: 'POST', body: JSON.stringify({ company }) });
     await load();
@@ -109,7 +116,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
           <span>直控方案 <b>{plans.length}</b></span>
         </div>
         <div className="topbar-right">
-          <button className="btn" onClick={() => setShowNew(true)}>+ 新建任务</button>
+          <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>任务统一由 AI 下单助手建立 · 人工在此审核与推进</span>
         </div>
       </div>
 
@@ -144,11 +151,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
         {tab === 'companies' && <CompaniesTab companies={companies} />}
       </div>
 
-      {showNew && <NewTaskModal onClose={() => setShowNew(false)} onCreated={async (id) => { setShowNew(false); await load(); await openTask(id); setTab('tasks'); }} aoiPrefill={aoiPrefill} />}
-      {autoOpenNew && !showNew && <NewTaskModal
-        onClose={() => setAutoOpenNew(false)}
-        onCreated={async (id) => { setAutoOpenNew(false); await load(); await openTask(id); setTab('tasks'); }}
-        aoiPrefill={aoiPrefill} />}
+
     </div>
   );
 }
@@ -160,7 +163,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
       {/* 任务列表 */}
       <div style={{ flex: selected ? '0 0 46%' : 1 }}>
         <table className="mission-table">
-          <thead><tr><th>任务编号</th><th>任务名称</th><th>类型</th><th>分辨率</th><th>优先级</th><th>状态</th><th>来源</th><th></th></tr></thead>
+          <thead><tr><th>任务编号</th><th>任务名称</th><th>类型</th><th>分辨率</th><th>优先级</th><th>状态</th><th>来源</th><th>操作</th></tr></thead>
           <tbody>
             {tasks.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: 20 }}>暂无任务，点击右上角「新建任务」创建</td></tr>}
             {tasks.map(t => (
@@ -175,7 +178,13 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                 <td className={`priority-${t.priority === '应急' ? 'critical' : t.priority === '重点' ? 'high' : 'medium'}`}>{t.priority}</td>
                 <td><span className="status-pill" style={{ background: (TASK_STATUS_COLOR[t.status] ?? '#888') + '22', color: TASK_STATUS_COLOR[t.status] ?? '#888' }}>{t.status}</span></td>
                 <td style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>{t.source === '对话下单' ? 'AI下单' : t.source === '手工录入' ? '手工' : t.source}</td>
-                <td><button className="btn secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); openTask(t.id); }}>详情</button></td>
+                <td style={{ display: 'flex', gap: 4 }}>
+                  <button className="btn secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={e => { e.stopPropagation(); openTask(t.id); }}>详情</button>
+                  {['待派单', '挂任务池'].includes(t.status) && (
+                    <button className="btn danger" style={{ padding: '2px 8px', fontSize: 11 }}
+                      onClick={e => { e.stopPropagation(); deleteTask(t.id); }}>删除</button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -423,97 +432,3 @@ function CompaniesTab({ companies }) {
   );
 }
 
-// ─── 新建任务弹窗 ─────────────────────────────────────────────────────────
-function NewTaskModal({ onClose, onCreated, aoiPrefill }) {
-  const [form, setForm] = useState({
-    taskName: aoiPrefill ? (aoiPrefill.note ? `${aoiPrefill.note} 参考点` : `AOI圈选任务 (${aoiPrefill.lat.toFixed(2)},${aoiPrefill.lon.toFixed(2)})`) : '',
-    targetName: aoiPrefill ? `AOI 圆心 ${aoiPrefill.lat.toFixed(2)}°,${aoiPrefill.lon.toFixed(2)}° r${aoiPrefill.radiusKm}km` : '',
-    targetType: '城区',
-    geomType: 'point',
-    lat: aoiPrefill ? String(aoiPrefill.lat) : '39.9042',
-    lon: aoiPrefill ? String(aoiPrefill.lon) : '116.4074',
-    obsType: 'optical', resolution: '1.0', spectral: '',
-    windowStart: '', windowEnd: '', maxCloud: '0.3', maxSlewDeg: '45',
-    timelinessHours: '', priority: '常规',
-  });
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-
-  const save = async () => {
-    setError('');
-    if (!form.taskName || !form.targetName || !form.windowStart || !form.windowEnd) {
-      setError('任务名称、目标名称、时间窗为必填'); return;
-    }
-    setSaving(true);
-    try {
-      const body = {
-        ...form,
-        source: '手工录入',
-        geomType: form.geomType,
-        geom: form.geomType === 'point'
-          ? { lat: parseFloat(form.lat), lon: parseFloat(form.lon) }
-          : { coords: JSON.parse(form.lat) },
-        resolution: parseFloat(form.resolution),
-        maxCloud: parseFloat(form.maxCloud),
-        maxSlewDeg: parseFloat(form.maxSlewDeg),
-        timelinessHours: form.timelinessHours ? parseFloat(form.timelinessHours) : null,
-      };
-      const r = await api('/dispatch/tasks', { method: 'POST', body: JSON.stringify(body) });
-      onCreated(r.id);
-    } catch (e) {
-      setError(e.error ? (Array.isArray(e.errors) ? e.errors.join('；') : e.error) : e.message);
-    }
-    setSaving(false);
-  };
-
-  return (
-    <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal">
-        <div className="modal-header">新建调度任务
-          <button className="close-btn" style={{ marginLeft: 'auto' }} onClick={onClose}>✕</button>
-        </div>
-        <div className="modal-body">
-          <div className="form-grid">
-            <div className="form-field"><label>任务名称 *</label>
-              <input value={form.taskName} onChange={e => set('taskName', e.target.value)} placeholder="如：华北洪涝应急监测" /></div>
-            <div className="form-field"><label>目标名称 *</label>
-              <input value={form.targetName} onChange={e => set('targetName', e.target.value)} placeholder="如：涿州市区" /></div>
-            <div className="form-field"><label>目标类型</label>
-              <select value={form.targetType} onChange={e => set('targetType', e.target.value)}>
-                {['城区', '农田', '水体', '林地', '港口', '机场', '道路', '工程', '其他'].map(t => <option key={t}>{t}</option>)}
-              </select></div>
-            <div className="form-field"><label>目标位置（纬度,经度）*</label>
-              <input value={`${form.lat},${form.lon}`} onChange={e => {
-                const [la, lo] = e.target.value.split(',').map(s => s.trim());
-                setForm(f => ({ ...f, lat: la ?? f.lat, lon: lo ?? f.lon }));
-              }} placeholder="39.9042,116.4074" /></div>
-            <div className="form-field"><label>观测类型 *</label>
-              <select value={form.obsType} onChange={e => set('obsType', e.target.value)}>
-                <option value="optical">光学</option><option value="sar">SAR雷达</option><option value="video">视频</option>
-              </select></div>
-            <div className="form-field"><label>分辨率要求（米）*</label>
-              <input type="number" step="0.1" value={form.resolution} onChange={e => set('resolution', e.target.value)} /></div>
-            <div className="form-field"><label>时间窗起 *</label>
-              <input type="datetime-local" value={form.windowStart} onChange={e => set('windowStart', e.target.value)} /></div>
-            <div className="form-field"><label>时间窗止 *</label>
-              <input type="datetime-local" value={form.windowEnd} onChange={e => set('windowEnd', e.target.value)} /></div>
-            <div className="form-field"><label>最大云量（0-1）</label>
-              <input type="number" step="0.05" value={form.maxCloud} onChange={e => set('maxCloud', e.target.value)} /></div>
-            <div className="form-field"><label>时效要求（小时，可选）</label>
-              <input type="number" value={form.timelinessHours} onChange={e => set('timelinessHours', e.target.value)} placeholder="24" /></div>
-            <div className="form-field"><label>优先级</label>
-              <select value={form.priority} onChange={e => set('priority', e.target.value)}>
-                <option>常规</option><option>重点</option><option>应急</option>
-              </select></div>
-          </div>
-          {error && <div className="form-error">{error}</div>}
-          <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
-            <button className="btn secondary" onClick={onClose}>取消</button>
-            <button className="btn" onClick={save} disabled={saving}>{saving ? '提交中…' : '生成任务单'}</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}

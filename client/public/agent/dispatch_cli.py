@@ -96,6 +96,7 @@ def main():
                 "sats [关键词]": "查卫星资源",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
+        "delete <taskId>": "删除任务单（仅待派单/挂任务池状态；级联清理候选排序订单）",
         'weather <lat> <lon> [天数=3]': "查目标点逐小时云量+最佳成像窗口建议（open-meteo真实预报，72h内）",
         "recommend '<JSON>'": "卫星类型智能推荐（用户未指定光学/SAR时调用），返回推荐类型+理由，交用户确认后再 create",
                 "plans": "直控方案列表",
@@ -193,6 +194,17 @@ def main():
             "云量最低时段": {"起": best[1], "止": best[2], "均云量%": best[0]} if best else None,
             "逐小时": [{"时间UTC": t, "云量%": c} for t, c in hours],
         })
+
+    elif cmd == "delete" and arg:
+        tid = int(arg)
+        t = api_req(f"/tasks/{tid}")
+        if (t.get("status") or "待派单") not in ("待派单", "挂任务池"):
+            die(f"任务 {t.get('taskNo')} 状态为 {t.get('status')}，不可直接删除（需先撤单/完成）")
+        # 用 _sql 的 DELETE 被禁——走 DELETE 方法
+        req = urllib.request.Request(API + f"/tasks/{tid}", method="DELETE", headers=_headers())
+        with urllib.request.urlopen(req, timeout=30) as r:
+            res = json.loads(r.read().decode())
+        out({"ok": True, "deleted": t.get("taskNo"), "级联清理": "candidates/rankings/orders/directPlans"})
 
     elif cmd == "orders":
         out(q("SELECT orderNo, taskId, channel, company, satName, status, price, fulfillment FROM orders ORDER BY id DESC LIMIT 30"))

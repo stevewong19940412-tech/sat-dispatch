@@ -54,8 +54,8 @@ export default function App() {
   const [cursorGeo, setCursorGeo] = useState(null);
   // 调度工作台
   const [workbench, setWorkbench] = useState(false);
-  // AOI 圈选预填（圈选后直通工作台新建任务）
-  const [aoiPrefill, setAoiPrefill] = useState(null);
+  // AOI 圈选上下文（交给 AI 建任务）
+  const [aoiContext, setAoiContext] = useState(null);
   const [agentVisible, setAgentVisible] = useState(false);
 
   const groupColors = useMemo(() => {
@@ -371,10 +371,11 @@ export default function App() {
                 </div>
                 <div className="btn-row">
                   <button className="btn" onClick={() => {
-                    // 直通调度工作台：以圈选 AOI 圆心预填新建任务表单
-                    setAoiPrefill({ lat: aoiPoint.lat, lon: aoiPoint.lon, radiusKm: aoiRadius });
-                    setWorkbench(true);
-                  }}>据此建调度任务</button>
+                    // 建单统一走 AI：唤起 AI 助手，把 AOI 上下文附进对话
+                    setAoiContext({ lat: aoiPoint.lat, lon: aoiPoint.lon, radiusKm: aoiRadius });
+                    setAgentVisible(true);
+                    setWorkbench(false);
+                  }}>交给 AI 建任务</button>
                   <button className="btn secondary" onClick={() => setAoiPoint(null)}>清除</button>
                 </div>
               </>
@@ -396,9 +397,9 @@ export default function App() {
             sat={selectedSat}
             onClose={() => { setSelectedSat(null); satLayerRef.current?.clearHighlight(); trackLayerRef.current?.clear(); }}
             onCreateMission={(sat) => {
-              // 调度语义：以该卫星星下点为参考打开调度工作台（卫星选择由调度算法决定，非人工指派）
-              setAoiPrefill({ lat: sat.lat ?? 0, lon: sat.lon ?? 0, radiusKm: 50, note: `参考卫星 ${sat.name} (NORAD ${sat.noradId})` });
-              setWorkbench(true);
+              // 调度语义：唤起 AI，以该星星下点为参考上下文建任务（卫星选择由调度算法决定）
+              setAoiContext({ lat: sat.lat ?? 0, lon: sat.lon ?? 0, radiusKm: 50, note: `参考卫星 ${sat.name} (NORAD ${sat.noradId})` });
+              setAgentVisible(true);
             }}
           />
         </div>
@@ -424,14 +425,14 @@ export default function App() {
           onSaved={missionSaved}
         />
       )}
-      {workbench && <DispatchWorkbench onBack={() => { setWorkbench(false); setAoiPrefill(null); }} aoiPrefill={aoiPrefill} />}
+      {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
       <AgentPane
         visible={agentVisible}
         onClose={() => setAgentVisible(false)}
         getContext={() => ({
           appOrigin: location.origin,
           page: workbench ? "调度工作台" : "三维态势",
-          selectedTaskId: workbench ? undefined : null,
+          aoiSelection: aoiContext,
           timestamp: new Date().toISOString(),
         })}
       />
