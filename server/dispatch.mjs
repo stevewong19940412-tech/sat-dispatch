@@ -7,6 +7,7 @@ import {
   applyConstraints, getCapability, haversineKm,
 } from "./candidate_calc.mjs";
 import { forecastCloudReal } from "./cloud_forecast.mjs";
+import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { rankTask } from "./priority_calc.mjs";
 import { solarElevationDegFor } from "./solar.mjs";
 
@@ -230,7 +231,8 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
 
   if (channel === '直控') {
     // R1 应急 → 创建直控执行方案（待值班确认）
-    const top = ranking[0];
+    // top 候选优选"幅宽可覆盖"（imgWin 非空）的，排序分相同前提下拍到 > 拍不到
+    const top = ranking.find(r => r.imgWinStart && r.imgWinEnd) ?? ranking[0];
     const r = db.prepare(`INSERT INTO directPlans (taskId,satNoradId,satName,company,windowStart,windowEnd,overpassTime,imgWinStart,imgWinEnd,status)
       VALUES (?,?,?,?,?,?,?,?,?, '待确认')`).run(task.id, top.satNoradId, top.satName, top.company,
       top.windowStart, top.windowEnd, top.overpassTime, top.imgWinStart, top.imgWinEnd);
@@ -541,10 +543,19 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
   const strips = normalizeTaskStrips(task, 12);
   const planSlew = plan.slewDeg ?? 15;
   const { commands, timeline } = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
+  // 测控弧段：真实站星几何计算（站-星仰角≥5°），选成像开始前最后一个可用弧段作为上注弧段
+  const passes = computeStationPasses(sat, plan.windowStart, plan.windowEnd);
+  const uplinkPass = pickUplinkPass(passes, timeline.imagingStartIso);
   // 参数包（T/CARSA 3-2022 指令文件要素）：卫星标识、测控弧段、指令序列、几何参数、任务上下文
   const paramPack = {
     satNoradId: plan.satNoradId, satName: plan.satName,
-    groundStation: '喀什站',                       // 测控上注站（模拟弧段以喀什为例）
+    groundStation: uplinkPass?.station ?? null,
+    uplinkPass: uplinkPass ? {
+      station: uplinkPass.station, arcStart: new Date(uplinkPass.arcStart).toISOString(),
+      arcEnd: new Date(uplinkPass.arcEnd).toISOString(), maxElDeg: uplinkPass.maxElDeg,
+      arcDurationSec: Math.round((uplinkPass.arcEnd - uplinkPass.arcStart) / 1000),
+    } : null,
+    allPasses: passes.map(p => ({ station: p.station, arcStart: new Date(p.arcStart).toISOString(), arcEnd: new Date(p.arcEnd).toISOString(), maxElDeg: p.maxElDeg })),
     window: { start: plan.windowStart, end: plan.windowEnd },
     tca: timeline.tcaIso, sequenceStart: timeline.sequenceStartIso,
     imagingStart: timeline.imagingStartIso, imagingEnd: timeline.imagingEndIso,
@@ -554,8 +565,13 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
     commands,
   };
   const validation = validateCommands(commands, sat, { ...plan, sequenceStartIso: timeline.sequenceStartIso });
-  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, sequenceStart=?, paramPack=?, status=?, updatedAt=datetime('now') WHERE id=?")
+  if (!uplinkPass) {
+    validation.pass = false;
+    validation.errors.push('无可上注弧段：成像前该卫星未过任何国内测控站（仰角≥5°），指令无法上注，请改派或调整时窗');
+  }
+  db.prepare("UPDATE directPlans SET commands=?, validation=?, timeline=?, sequenceStart=?, paramPack=?, arcInfo=?, status=?, updatedAt=datetime('now') WHERE id=?")
     .run(JSON.stringify(commands), JSON.stringify(validation), JSON.stringify(timeline), timeline.sequenceStartIso, JSON.stringify(paramPack),
+      uplinkPass ? JSON.stringify({ station: uplinkPass.station, arcStart: new Date(uplinkPass.arcStart).toISOString(), arcEnd: new Date(uplinkPass.arcEnd).toISOString(), maxElDeg: uplinkPass.maxElDeg }) : null,
       validation.pass ? '待核验下发' : '校验驳回', plan.id);
   res.json({ commands, validation, timeline, paramPack });
 });
@@ -582,9 +598,13 @@ dispatchApi.post("/plans/:id/confirm", (req, res) => {
   db.prepare("UPDATE directPlans SET status=?, updatedAt=datetime('now') WHERE id=?").run(next, plan.id);
   // 模拟测控弧段与执行
   if (next === '已上注') {
-    const arc = { station: '喀什站', arcStart: new Date(Date.now() + 1800000).toISOString(), arcEnd: new Date(Date.now() + 2100000).toISOString() };
+    // 上注弧段用参数包计算的真实弧段（不再编造）
+    const pack = plan.paramPack ? JSON.parse(plan.paramPack) : null;
+    const arc = pack?.uplinkPass
+      ? { station: pack.uplinkPass.station, arcStart: pack.uplinkPass.arcStart, arcEnd: pack.uplinkPass.arcEnd, maxElDeg: pack.uplinkPass.maxElDeg }
+      : null;
     db.prepare("UPDATE directPlans SET arcInfo=?, status='执行中', updatedAt=datetime('now') WHERE id=?")
-      .run(JSON.stringify(arc), plan.id);
+      .run(arc ? JSON.stringify(arc) : plan.arcInfo, plan.id);
     db.prepare("UPDATE tasks SET status='直控执行中' WHERE id=?").run(plan.taskId);
   }
   res.json({ ok: true, status: next });

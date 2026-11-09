@@ -187,6 +187,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                     <div>卫星：{pack.satName} (NORAD {pack.satNoradId}) ｜ 上注站：{pack.groundStation}</div>
                     <div>成像窗：{pack.window.start?.slice(5, 19)} ~ {pack.window.end?.slice(5, 19)} UTC</div>
                     <div>最近过顶（TCA）：{pack.tca?.slice(5, 19)} UTC ｜ 侧摆 {pack.slewDeg}°</div>
+                    <div>上注弧段：{pack.uplinkPass
+                      ? `${pack.uplinkPass.station} ${pack.uplinkPass.arcStart?.slice(5, 19)} ~ ${pack.uplinkPass.arcEnd?.slice(5, 19)} UTC（最大仰角 ${pack.uplinkPass.maxElDeg}°，弧段 ${pack.uplinkPass.arcDurationSec}s）`
+                      : <span style={{ color: 'var(--danger)' }}>无可用上注弧段（成像前该星未过国内测控站），不能上注</span>}</div>
                     <div>指令序列开始：{pack.sequenceStart?.slice(11, 19)} UTC（TCA 前 {(() => {
                       const d = (new Date(pack.tca) - new Date(pack.sequenceStart)) / 1000; return Math.round(d);
                     })()}s）</div>
@@ -210,7 +213,13 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                   <div style={{ fontSize: 12.5, fontWeight: 600, margin: '8px 0 6px' }}>上注前核验（逐项确认）</div>
                   {['windowOk', 'tcaAligned', 'commandsValid', 'satArcOk'].map(k => {
                     const label = { windowOk: '成像时窗正确（与任务要求一致）', tcaAligned: '指向对准（成像中点已对准最近过顶点）',
-                      commandsValid: '指令校验通过（时序/固存/参数合规）', satArcOk: '卫星与测控弧段正确（喀什站弧段可覆盖）' }[k];
+                      commandsValid: '指令校验通过（时序/固存/参数合规）',
+                      satArcOk: (() => {
+                        const pack = uplinkVerify.paramPack ? JSON.parse(uplinkVerify.paramPack) : null;
+                        const up = pack?.uplinkPass;
+                        return up ? `上注弧段正确（${up.station} ${up.arcStart?.slice(11, 19)}~${up.arcEnd?.slice(11, 19)} UTC，最大仰角 ${up.maxElDeg}°）`
+                          : '上注弧段确认（无可用弧段时此项不可勾选）';
+                      })() }[k];
                     return (
                       <label key={k} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, margin: '4px 0', cursor: 'pointer' }}>
                         <input type="checkbox" checked={uplinkChecklist[k] ?? false}
