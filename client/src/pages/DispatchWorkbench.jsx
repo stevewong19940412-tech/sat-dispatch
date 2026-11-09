@@ -19,6 +19,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   const [pool, setPool] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // 删除确认弹窗状态（主组件持有，TasksTab 通过 onRequestDelete 回调触发）
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
 
   const load = useCallback(async () => {
     // 并行拉取（原来是 5 个串行 await，最慢者拖累全部）
@@ -185,8 +187,6 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
 function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete }) {
-  // 删除确认弹窗（自定义 Modal；原生 confirm 在嵌入预览环境会被静默拦截）
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
