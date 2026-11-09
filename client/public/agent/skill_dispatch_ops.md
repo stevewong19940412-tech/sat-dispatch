@@ -19,6 +19,8 @@ python3 "$CLI" <子命令>
 - `dispatch candidates <id>` 候选计算（耗时 10~60 秒，告知用户稍等）
 - `dispatch dispatch <id>` 派单分流
 - `dispatch sats <关键词>` 查卫星；`dispatch companies` 查公司履约
+- `dispatch weather <lat> <lon> [天数]` 查目标点逐小时真实云量+最低云量窗口建议（72h内）
+- `dispatch recommend '<JSON>'` 卫星类型智能推荐（光学 vs SAR，带理由）——用户未指定观测类型时先调用它
 
 注意：
 - **调度系统是常驻服务，永远不需要"恢复"或重启**。禁止执行 `blade session copy-dir`、`pnpm install`、重启 server 之类的动作——那是在修一个不存在的故障。

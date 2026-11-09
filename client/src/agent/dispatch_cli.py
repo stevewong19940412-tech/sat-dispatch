@@ -20,8 +20,32 @@ def location_origin_from_context():
         pass
     return None
 
-FALLBACK_BASE = "https://sat-dispatch-b49nzu7t.local220.bladeai.site"
-APP_BASE = os.environ.get("DISPATCH_APP_BASE") or location_origin_from_context() or FALLBACK_BASE
+# 候选地址池（按优先级）：环境变量 → 页面上下文 → 常驻域名（唯一长期在线入口）
+_CANDIDATES = []
+_env = os.environ.get("DISPATCH_APP_BASE")
+if _env: _CANDIDATES.append(_env.rstrip("/"))
+_ctx = location_origin_from_context()
+if _ctx: _CANDIDATES.append(_ctx.rstrip("/"))
+_CANDIDATES.append("https://sat-dispatch-b49nzu7t.local220.bladeai.site")
+_CANDIDATES = list(dict.fromkeys(_CANDIDATES))  # 去重保序
+
+def _probe(base):
+    """探测候选地址：/api/dispatch/companies 200 即通（带token过网关）"""
+    try:
+        req = urllib.request.Request(base + "/api/dispatch/companies", headers=_headers())
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+def resolve_base():
+    """依次探测候选地址，返回第一个通的。全部不通则用第一个并让真实调用报错。"""
+    for base in _CANDIDATES:
+        if _probe(base):
+            return base
+    return _CANDIDATES[0]
+
+APP_BASE = resolve_base()
 API = APP_BASE + "/api/dispatch"
 
 def out(data):
@@ -72,6 +96,8 @@ def main():
                 "sats [关键词]": "查卫星资源",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
+        'weather <lat> <lon> [天数=3]': "查目标点逐小时云量+最佳成像窗口建议（open-meteo真实预报，72h内）",
+        "recommend '<JSON>'": "卫星类型智能推荐（用户未指定光学/SAR时调用），返回推荐类型+理由，交用户确认后再 create",
                 "plans": "直控方案列表",
             },
         })
@@ -89,6 +115,13 @@ def main():
         t["plans"] = q("SELECT id, satName, status, overpassTime FROM directPlans WHERE taskId=?", (t["id"],))
         out(t)
 
+    elif cmd == "recommend" and arg:
+        try:
+            body = json.loads(arg)
+        except Exception:
+            die("用法: dispatch recommend '{\"targetName\":\"...\",\"lat\":39.9,\"lon\":116.4,\"resolution\":1,\"timelinessHours\":24,\"windowStart\":\"...\",\"windowEnd\":\"...\"}'")
+        out(api_req("/recommend", "POST", body))
+
     elif cmd == "create" and arg:
         try:
             body = json.loads(arg)
@@ -97,12 +130,21 @@ def main():
         missing = []
         if not body.get("targetName"): missing.append("目标名称(targetName)")
         if body.get("lat") is None or body.get("lon") is None: missing.append("目标坐标(lat/lon)")
-        if not body.get("obsType"): missing.append("观测类型(obsType: optical/sar)")
+        if not body.get("obsType"):
+            rec = api_req("/recommend", "POST", {k: body.get(k) for k in ("targetName","lat","lon","resolution","timelinessHours","windowStart","windowEnd") if body.get(k) is not None})
+            missing.append("观测类型(obsType: optical/sar)")
+            recommend_hint = rec
         if not body.get("resolution"): missing.append("分辨率米数(resolution)")
         if not body.get("windowStart") or not body.get("windowEnd"): missing.append("时间窗(windowStart/windowEnd)")
         if missing:
-            out({"ok": False, "needClarify": True, "missing": missing,
-                 "hint": "一次性合并追问全部缺项，每项给建议取值，不要挤牙膏"})
+            resp = {"ok": False, "needClarify": True, "missing": missing,
+                    "hint": "一次性合并追问全部缺项，每项给建议取值，不要挤牙膏"}
+            if recommend_hint:
+                resp["satTypeRecommendation"] = recommend_hint
+                resp["hint"] = ("观测类型未定：请先用 AskUserQuestion 向用户展示卫星类型推荐"
+                                "（推荐 " + str(recommend_hint.get('recommended')) + " 及理由）并让用户确认，"
+                                "其余缺项一并合并追问")
+            out(resp)
             return
         r = api_req("/tasks", "POST", {**body, "source": "对话下单", "geomType": "point", "geom": {"lat": body["lat"], "lon": body["lon"]}})
         out({"ok": True, "task": {"id": r["id"], "taskNo": r["taskNo"], "taskName": r["taskName"], "status": r["status"]},
@@ -120,6 +162,37 @@ def main():
 
     elif cmd == "companies":
         out(q("SELECT id, short, name, type, capacity, acceptedCount, round(fulfillmentRate,3) fulfillmentRate, dataQuality FROM companies ORDER BY id"))
+
+    elif cmd == "weather":
+        rest = sys.argv[2:]
+        if len(rest) < 2: die("用法: dispatch weather <lat> <lon> [天数=3]")
+        lat, lon = float(rest[0]), float(rest[1])
+        days = int(rest[2]) if len(rest) > 2 else 3
+        days = max(1, min(days, 3))  # open-meteo 逐小时预报上限3天
+        url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+               f"&hourly=cloud_cover&timezone=UTC&forecast_days={days}")
+        req = urllib.request.Request(url)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read().decode())
+        except Exception as e:
+            die(f"open-meteo 调用失败: {e}")
+        times = data.get("hourly", {}).get("time", [])
+        clouds = data.get("hourly", {}).get("cloud_cover", [])
+        if not times: die("open-meteo 返回缺 hourly 字段（参数或区域问题）")
+        hours = list(zip(times, clouds))
+        # 最佳窗口：连续3个整小时云量均值最低的时段（给成像窗口建议）
+        best = None
+        for i in range(len(hours) - 2):
+            avg = sum(c for _, c in hours[i:i+3]) / 3
+            if best is None or avg < best[0]: best = (avg, hours[i][0], hours[i+2][0])
+        out({
+            "来源": "open-meteo 真实逐小时预报（UTC）",
+            "点": {"lat": lat, "lon": lon},
+            "小时数": len(hours),
+            "云量最低时段": {"起": best[1], "止": best[2], "均云量%": best[0]} if best else None,
+            "逐小时": [{"时间UTC": t, "云量%": c} for t, c in hours],
+        })
 
     elif cmd == "orders":
         out(q("SELECT orderNo, taskId, channel, company, satName, status, price, fulfillment FROM orders ORDER BY id DESC LIMIT 30"))

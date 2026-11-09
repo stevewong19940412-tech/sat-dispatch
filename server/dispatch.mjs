@@ -344,6 +344,44 @@ dispatchApi.get("/orders", (req, res) => {
   res.json(db.prepare("SELECT * FROM orders ORDER BY id DESC LIMIT 200").all());
 });
 
+// 卫星类型智能推荐（用户未指定 obsType 时，AI 先调用此接口分析，再请用户确认）
+dispatchApi.post("/recommend", (req, res) => {
+  const { targetName, lat, lon, resolution, timelinessHours, windowStart, windowEnd } = req.body ?? {};
+  const reasons = []; const scores = { optical: 0, sar: 0 };
+  // 1. 时效性：24h内交付 → SAR 全天候优势
+  if (timelinessHours && timelinessHours <= 24) { scores.sar += 3; reasons.push(`时效要求 ${timelinessHours}h 较紧，SAR 不受光照与云影响，可全天候成像`); }
+  else if (timelinessHours && timelinessHours <= 72) { scores.sar += 1; reasons.push("时效 72h 内，SAR 时间窗更灵活"); }
+  // 2. 分辨率：高分辨率（≤1m）光学优势明显
+  if (resolution && resolution <= 1) { scores.optical += 2; reasons.push(`分辨率 ${resolution}m 属高分辨率需求，光学星（高分/吉林一号/高景）在该档位选择更多`); }
+  else if (resolution && resolution >= 5) { scores.optical += 1; reasons.push(`分辨率 ${resolution}m 属中低分辨率，光学星容量充足`); }
+  // 3. 时间窗与昼夜：窗内含夜间/晨昏 → SAR
+  if (windowStart && windowEnd) {
+    const t0 = new Date(windowStart), t1 = new Date(windowEnd);
+    const hours = (t1 - t0) / 3600000;
+    if (hours <= 6) {
+      // 窄窗内若跨晨昏，SAR 更稳
+      const h0 = t0.getUTCHours() + t0.getUTCMinutes()/60;
+      const localH = (h0 + 8) % 24; // 粗略按东八区（可扩展为按经度算）
+      if (localH < 7 || localH > 17) { scores.sar += 2; reasons.push("窗口落在晨昏/夜间时段（当地时间），光学成像光照不足，推荐 SAR"); }
+    }
+    if (hours >= 48) { scores.optical += 1; reasons.push("窗口较宽（≥2天），光学过顶集中在当地上午 10:30~13:30，命中率足够"); }
+  }
+  // 4. 天气：72h 预报窗内的目标点查 open-meteo，多云/降水 → SAR
+  //    （轻量实现：不阻塞推荐，标注"建议结合 dispatch weather 核实"）
+  reasons.push("建议用 dispatch weather <lat> <lon> 核实目标点 72h 内云量：若预报持续 >60%，光学成像大概率不可用，应转 SAR");
+  // 5. 目标类型关键词（水面/金属/形变监测 → SAR 特长）
+  const name = String(targetName ?? "");
+  if (/海域|海面|舰船|港口水面|桥梁形变|沉降|形变|冰/.test(name)) { scores.sar += 2; reasons.push("目标涉及水面/形变/冰情等场景，SAR 的全天候与干涉能力更适配"); }
+  if (/植被|农田|城区细节|场馆|道路|绿化|色彩/.test(name)) { scores.optical += 2; reasons.push("目标涉及地物细节/色彩/植被场景，光学更适合"); }
+  const winner = scores.optical >= scores.sar ? "optical" : "sar";
+  res.json({
+    recommended: winner,
+    scores,
+    reasons,
+    note: "推荐仅供参考，请通过 AskUserQuestion 让用户确认最终观测类型后再创建任务"
+  });
+});
+
 // 供智能体 CLI 的只读 SQL 查询（白名单表，SELECT only）
 dispatchApi.post("/_sql", (req, res) => {
   const { sql, args = [] } = req.body ?? {};
