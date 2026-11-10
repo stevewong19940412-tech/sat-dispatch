@@ -30,6 +30,19 @@ export function validateTask(t) {
   return errors;
 }
 
+// 撤单回退：将已派发任务退回待派单（删其订单、留痕），供人工重新选择派发方式
+dispatchApi.post("/tasks/:id/revoke", (req, res) => {
+  const t = db.prepare("SELECT * FROM tasks WHERE id=?").get(+req.params.id);
+  if (!t) return res.status(404).json({ error: 'task not found' });
+  if (!['已派发', '已接单'].includes(t.status))
+    return res.status(400).json({ error: `状态 ${t.status} 不可撤回（仅已派发/已接单可撤）` });
+  db.prepare("DELETE FROM orders WHERE taskId=?").run(t.id);
+  db.prepare("UPDATE tasks SET status='待派单' WHERE id=?").run(t.id);
+  db.prepare(`INSERT INTO dispatchLog (taskId, action, detail) VALUES (?, '撤单回退', ?)`)
+    .run(t.id, req.body?.reason ?? '人工撤回，重新选择派发方式');
+  res.json({ ok: true, status: '待派单' });
+});
+
 // 任务级人工确认：AI 建单默认 pendingConfirm=true（待人工确认下发），
 // 工作台点"确认下发"后才置 false 并可派发。手工录入默认 false。
 dispatchApi.post("/tasks/:id/confirm", (req, res) => {

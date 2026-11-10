@@ -36,7 +36,13 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
       api('/dispatch/companies').catch(() => []),
       api('/dispatch/pool').catch(() => []),
     ]);
-    setTasks(t); setOrders(o); setPlans(p); setCompanies(c); setPool(pl);
+    // 浅比较后再 setState：数据未变不重渲染（消除轮询导致的整表卡顿）
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    setTasks(prev => same(prev, t) ? prev : t);
+    setOrders(prev => same(prev, o) ? prev : o);
+    setPlans(prev => same(prev, p) ? prev : p);
+    setCompanies(prev => same(prev, c) ? prev : c);
+    setPool(prev => same(prev, pl) ? prev : pl);
   }, []);
 
   useEffect(() => {
