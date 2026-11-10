@@ -194,14 +194,14 @@ def main():
             body = _json.loads(arg)
         except Exception as e:
             die(f"参数必须是合法 JSON：{e}")
-        r = _api("POST", "/dispatch/order-intake", body)
+        r = api_req("/order-intake", method="POST", body=body)
         print(_json.dumps(r, ensure_ascii=False, indent=1))
         if r.get("ok"):
             print(f"\n✅ 已落库：{r['taskNo']}（候选 {r.get('candidates')}，状态=待派单）")
             print("→ 派单方式由用户在调度工作台人工选择；不要重复建单。")
         elif r.get("reused"):
             print(f"\n↩ 同目标任务已存在：{r['taskNo']}（状态 {r['status']}），未重复建单。")
-        sys_exit(0)
+        sys.exit(0)
     elif cmd == "dispatch":
         die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
             "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
