@@ -123,7 +123,8 @@ def main():
                 "task <id>": "任务详情（排序清单/订单/直控方案）",
                 "create '<JSON>'": "创建任务单。字段: taskName,targetName,lat,lon,obsType(optical/sar),resolution(米),windowStart,windowEnd(ISO),maxCloud(0-1),timelinessHours,priority(常规/重点/应急)。必填缺失时返回 needClarify",
                 "candidates <taskId>": "候选卫星计算（可见窗/约束/云量/排序，耗时较长）",
-                "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
+                "order-intake <json>": "一站式下单（推荐）：传任务JSON，服务端原子完成建单+确认+候选+回读断言",
+        "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
                 "sats [关键词]": "查卫星资源",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
@@ -185,6 +186,22 @@ def main():
     elif cmd == "candidates" and arg:
         out(api_req(f"/tasks/{int(arg)}/candidates", "POST"))
 
+    elif cmd == "order-intake" and arg:
+        # 一站式下单：JSON参数 → 服务端原子建单+确认+候选 → 回读断言
+        # 用法: dispatch order-intake '{"taskName":"...","geomType":"point","geom":{"lat":..,"lon":..},"obsType":"optical","resolution":2,"windowStart":"...","windowEnd":"...","maxCloud":50,"priority":"常规"}'
+        import json as _json
+        try:
+            body = _json.loads(arg)
+        except Exception as e:
+            die(f"参数必须是合法 JSON：{e}")
+        r = _api("POST", "/dispatch/order-intake", body)
+        print(_json.dumps(r, ensure_ascii=False, indent=1))
+        if r.get("ok"):
+            print(f"\n✅ 已落库：{r['taskNo']}（候选 {r.get('candidates')}，状态=待派单）")
+            print("→ 派单方式由用户在调度工作台人工选择；不要重复建单。")
+        elif r.get("reused"):
+            print(f"\n↩ 同目标任务已存在：{r['taskNo']}（状态 {r['status']}），未重复建单。")
+        sys_exit(0)
     elif cmd == "dispatch":
         die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
             "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")

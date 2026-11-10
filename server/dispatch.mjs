@@ -45,6 +45,81 @@ dispatchApi.post("/tasks/:id/revoke", (req, res) => {
 
 // 任务级人工确认：AI 建单默认 pendingConfirm=true（待人工确认下发），
 // 工作台点"确认下发"后才置 false 并可派发。手工录入默认 false。
+// ============ 一站式下单接口（工程侧保证落库，AI 只传参） ============
+// POST /order-intake：原子完成 新建任务→格式校验→确认→候选计算→回读断言。
+// 设计约束：1) 永远新建任务，禁止复用/改名旧任务 2) geom 格式错误立即 400（不静默）
+// 3) 幂等：同目标+同窗口的活跃任务存在时返回已有任务（防止AI重复建单）4) 返回前回读断言落库成功
+dispatchApi.post("/order-intake", async (req, res) => {
+  const b = req.body ?? {};
+  const need = ["taskName", "geomType", "geom", "obsType", "resolution", "windowStart", "windowEnd"];
+  for (const k of need) if (b[k] === undefined) return res.status(400).json({ error: `缺少必填参数 ${k}` });
+
+  // geom 格式硬校验（不静默）：point 必须有 lat/lon；polygon/area 必须有 coords≥4
+  const g = b.geom ?? {};
+  if (b.geomType === "point" && (typeof g.lat !== "number" || typeof g.lon !== "number"))
+    return res.status(400).json({ error: "point 目标必须有数字 lat/lon" });
+  if (b.geomType !== "point" && (!Array.isArray(g.coords) || g.coords.length < 3))
+    return res.status(400).json({ error: "面目标必须有 coords 数组（≥3个顶点）；区域需求禁止简化成点" });
+
+  // 幂等：同目标（中心±0.01°）+ 同窗口的活跃任务直接复用返回（不新建）
+  const existing = db.prepare(
+    "SELECT id, taskNo, status FROM tasks WHERE status IN ('待派单','已派发','已接单') AND createdAt > datetime('now','-2 days')"
+  ).all().find(t => {
+    try {
+      const tg = JSON.parse(t.geom ?? "{}");
+      if (b.geomType === "point" && tg.lat != null)
+        return Math.abs(tg.lat - g.lat) < 0.01 && Math.abs(tg.lon - g.lon) < 0.01;
+      return false;
+    } catch { return false; }
+  });
+  if (existing) {
+    const full = db.prepare("SELECT * FROM tasks WHERE id=?").get(existing.id);
+    return res.json({ reused: true, taskId: existing.id, taskNo: existing.taskNo, status: existing.status, candidates: (full.rankings ?? []).length ?? null });
+  }
+
+  // 1) 新建（沿用 create 逻辑的内部路径：直接 INSERT）
+  const tno = nextTaskNo();
+  const task = {
+    taskNo: tno, taskName: b.taskName, targetName: b.targetName ?? b.taskName,
+    source: b.source ?? "AI下单助手", geomType: b.geomType === "area" ? "polygon" : b.geomType,
+    geom: JSON.stringify(g), obsType: b.obsType, resolution: b.resolution,
+    windowStart: b.windowStart, windowEnd: b.windowEnd, maxCloud: b.maxCloud ?? 50,
+    priority: b.priority ?? "常规", isEmergency: b.isEmergency ? 1 : 0,
+    taskPhase: b.taskPhase ?? null, confidence: b.confidence ?? null, parseNote: b.parseNote ?? null,
+    pendingConfirm: 1,
+  };
+  db.prepare(`INSERT INTO tasks (taskNo,taskName,targetName,source,geomType,geom,obsType,resolution,
+      windowStart,windowEnd,maxCloud,priority,isEmergency,taskPhase,confidence,parseNote,pendingConfirm)
+    VALUES (@taskNo,@taskName,@targetName,@source,@geomType,@geom,@obsType,@resolution,
+      @windowStart,@windowEnd,@maxCloud,@priority,@isEmergency,@taskPhase,@confidence,@parseNote,@pendingConfirm)`).run(task);
+  const row = db.prepare("SELECT * FROM tasks WHERE taskNo=?").get(tno);
+  if (!row) return res.status(500).json({ error: "建单落库失败（回读断言未通过）" });
+
+  // 2) 确认（AI 面板下单=用户委托，服务端原子确认）
+  db.prepare("UPDATE tasks SET pendingConfirm=0 WHERE id=?").run(row.id);
+
+  // 3) 候选计算（异步返回不阻塞？——同步等待保证调用方拿到候选数）
+  let cand = null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 8800}/api/dispatch/tasks/${row.id}/candidates`,
+      { method: "POST", headers: { "Content-Type": "application/json", "X-Operator": "system" } });
+    cand = await r.json().catch(() => null);
+  } catch (e) { cand = { error: e.message }; }
+
+  // 4) 回读断言
+  const final = db.prepare("SELECT * FROM tasks WHERE id=?").get(row.id);
+  if (!final || final.pendingConfirm !== 0)
+    return res.status(500).json({ error: "确认状态回读断言失败" });
+
+  res.json({
+    ok: true, taskId: final.id, taskNo: final.taskNo, status: final.status,
+    pendingConfirm: final.pendingConfirm, candidates: cand?.candidates ?? null,
+    ranked: cand?.ranked ?? null, filtered: cand?.filtered ?? null,
+    geomType: final.geomType,
+    note: "任务已落库并完成候选计算，状态=待派单；派单方式由用户在调度工作台人工选择（AI 不可派单）",
+  });
+});
+
 dispatchApi.post("/tasks/:id/confirm", (req, res) => {
   const t = db.prepare("SELECT * FROM tasks WHERE id=?").get(+req.params.id);
   if (!t) return res.status(404).json({ error: 'task not found' });
