@@ -27,7 +27,7 @@ export const OBS_PRESETS = [
 
 export async function api(path, opts) {
   const res = await fetch(`/api${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Operator": "human" },
     ...opts,
   });
   if (!res.ok) {

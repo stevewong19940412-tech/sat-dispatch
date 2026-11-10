@@ -123,7 +123,7 @@ def main():
                 "task <id>": "任务详情（排序清单/订单/直控方案）",
                 "create '<JSON>'": "创建任务单。字段: taskName,targetName,lat,lon,obsType(optical/sar),resolution(米),windowStart,windowEnd(ISO),maxCloud(0-1),timelinessHours,priority(常规/重点/应急)。必填缺失时返回 needClarify",
                 "candidates <taskId>": "候选卫星计算（可见窗/约束/云量/排序，耗时较长）",
-                "dispatch <taskId>": "派单分流",
+                "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
                 "sats [关键词]": "查卫星资源",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
@@ -185,19 +185,9 @@ def main():
     elif cmd == "candidates" and arg:
         out(api_req(f"/tasks/{int(arg)}/candidates", "POST"))
 
-    elif cmd == "dispatch" and arg:
-        out(api_req(f"/tasks/{int(arg)}/dispatch", "POST"))
-
-    elif cmd == "sats":
-        kw = arg or ""
-        out(q("SELECT noradId, name, category, subCategory, payloadType, operator, country, round(altitude) altitudeKm, round(inclination,1) inclination FROM satellites WHERE decayed=0 AND (name LIKE ? OR operator LIKE ?) LIMIT 20", (f"%{kw}%", f"%{kw}%")))
-
-    elif cmd == "companies":
-        out(q("SELECT id, short, name, type, capacity, acceptedCount, round(fulfillmentRate,3) fulfillmentRate, dataQuality FROM companies ORDER BY id"))
-
-    elif cmd == "weather":
-        rest = sys.argv[2:]
-        if len(rest) < 2: die("用法: dispatch weather <lat> <lon> [天数=3]")
+    elif cmd == "dispatch":
+        die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
+            "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
         lat, lon = float(rest[0]), float(rest[1])
         days = int(rest[2]) if len(rest) > 2 else 3
         days = max(1, min(days, 3))  # open-meteo 逐小时预报上限3天

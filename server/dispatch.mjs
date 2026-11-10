@@ -247,6 +247,11 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });
   if (task.pendingConfirm) return res.status(400).json({ error: '任务待人工确认下发，请先在工作台点击「确认下发」' });
 
+  // 工程侧加固：派单只接受工作台人工操作（X-Operator: human 头）。
+  // CLI/AI 通道的派单调用一律 403——大模型遵循 skill 指令不稳，能力在工程侧物理断掉。
+  if (req.headers['x-operator'] !== 'human') {
+    return res.status(403).json({ error: '派单仅限调度工作台人工操作（工程侧加固）。AI/CLI 无派单权限，请引导用户在工作台任务详情点「派给公司」或「生成直控任务指令」。' });
+  }
   // 人工指定通道优先：前端「派给公司」传 channel=公司通道，「生成直控指令」传 channel=直控；
   // 未指定时走 R1~R6 自动判定
   const manualChannel = req.body?.channel;
