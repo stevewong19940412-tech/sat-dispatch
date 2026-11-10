@@ -23,6 +23,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   // 直控参数包核验弹窗（主组件持有；人工勾选核验项后确认上注）
   const [uplinkVerify, setUplinkVerify] = useState(null);
+  // 派给公司方式选择弹窗（指定第一公司/全候选竞价/挂池抢单）
+  const [assignMode, setAssignMode] = useState(null);
   const [uplinkChecklist, setUplinkChecklist] = useState({});
 
   const load = useCallback(async () => {
@@ -163,12 +165,55 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 
       <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}>
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
-          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} />}
+          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} setAssignMode={setAssignMode} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
         {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
         {tab === 'companies' && <CompaniesTab companies={companies} />}
       </div>
+
+      {/* 派给公司方式选择弹窗：指定第一公司 / 全候选竞价 / 挂池抢单 */}
+      {assignMode && (
+        <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setAssignMode(null); }}>
+          <div className="modal" style={{ width: 440 }}>
+            <div className="modal-header">派给公司 · 选择方式
+              <button className="close-btn" style={{ marginLeft: 'auto' }} onClick={() => setAssignMode(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 10 }}>
+                任务 {assignMode.taskNo}「{assignMode.taskName}」｜ 候选 {assignMode.rankings?.length ?? 0} 条
+              </div>
+              {[
+                { key: 'top1', title: '派给排名第一的公司', desc: `直接指派 ${assignMode.rankings?.[0]?.company ?? '—'}（${assignMode.rankings?.[0]?.satName ?? '—'}，优先级评分最高）`, act: 'top1' },
+                { key: 'inquiry', title: '向所有候选公司发起竞价', desc: `候选公司 ${new Set((assignMode.rankings ?? []).map(r => r.company)).size} 家，报价后人工定标`, act: 'inquiry' },
+                { key: 'pool', title: '挂入任务池让公司抢单', desc: '符合条件的公司自行认领，适合小额碎片任务', act: 'pool' },
+              ].map(opt => (
+                <div key={opt.key} onClick={async () => {
+                  try {
+                    if (opt.act === 'top1') {
+                      const d = await api(`/dispatch/tasks/${assignMode.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '指派' }) });
+                      setMsg({ ok: true, text: `已指派 ${d.company ?? ''}（${d.orderNo ?? ''}）` });
+                    } else if (opt.act === 'inquiry') {
+                      const d = await api(`/dispatch/tasks/${assignMode.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '询价' }) });
+                      setMsg({ ok: true, text: `竞价已发起：主单 ${d.orderNo ?? ''}${(d.inquiries ?? []).length ? '，询价 ' + d.inquiries.length + ' 家' : ''}` });
+                    } else {
+                      await api(`/dispatch/tasks/${assignMode.id}/pool`, { method: 'POST', body: JSON.stringify({}) });
+                      setMsg({ ok: true, text: '已挂入任务池，等待公司抢单' });
+                    }
+                    setAssignMode(null);
+                    await openTask(assignMode.id);
+                  } catch (e) { setMsg({ ok: false, text: e.message }); }
+                }} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: '10px 12px', marginBottom: 8, cursor: 'pointer' }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--accent)'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--border)'}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)' }}>{opt.title}</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>{opt.desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 直控参数包核验与上注确认弹窗（上注前人工逐项核验——遥控作业规范） */}
       {uplinkVerify && (
@@ -297,7 +342,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 }
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
-function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete }) {
+function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode }) {
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
@@ -437,9 +482,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                     onClick={async () => {
                       try {
                         if (!selected.rankings?.length) await runCandidates(selected.id);
-                        const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '询价' }) });
-                        setMsg({ ok: true, text: `已派给公司：主单 ${d.orderNo ?? ''}${(d.inquiries ?? []).length ? '，询价' + d.inquiries.length + '家' : ''}` });
-                        await openTask(selected.id);
+                        setAssignMode(selected);   // 打开"派给公司"方式选择弹窗
                       } catch (e) { setMsg({ ok: false, text: e.message }); }
                     }}>派给公司</button>
                   <button className="btn danger" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
