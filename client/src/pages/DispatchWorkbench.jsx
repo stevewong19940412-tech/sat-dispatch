@@ -47,7 +47,13 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 15000); // 8s→15s：列表类数据不需要高频
+    // 轮询节流：弹窗打开或鼠标悬停在可点击元素上时跳过本轮刷新，
+    // 防止 15s 轮询重渲染与用户点击竞争（点击被吞/按钮 ref 失效——AI 面板打不开的根因）
+    const t = setInterval(() => {
+      const interacting = document.querySelector('.modal-overlay') ||
+        document.querySelector('button:hover') || document.querySelector('div[style*="cursor: pointer"]:hover');
+      if (!interacting) load();
+    }, 15000);
     return () => clearInterval(t);
   }, [load]);
 
