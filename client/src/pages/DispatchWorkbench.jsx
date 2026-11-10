@@ -429,16 +429,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
           {selected.pendingConfirm === 1 && (
             <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 4, fontSize: 12.5,
               background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.4)', color: 'var(--text-bright)' }}>
-              ⚠ 该任务由 AI 创建，尚未人工确认下发。请核对下方目标 AOI 与任务要素后确认。
-              <div style={{ marginTop: 8 }}>
-                <button className="btn" disabled={busy} onClick={async () => {
-                  try {
-                    await api(`/dispatch/tasks/${selected.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
-                    setMsg({ ok: true, text: '已确认下发，进入派单分流' });
-                    await openTask(selected.id);
-                  } catch (e) { setMsg({ ok: false, text: e.message }); }
-                }}>确认下发</button>
-              </div>
+              ⚠ 该任务由 AI 创建，尚未人工确认下发。核对 AOI 与任务要素后，在下方「任务包」选择下发方式（选择时自动完成确认）。
             </div>
           )}
           {/* 执行链路指引（状态驱动）：让 AI 下单与工作台操作无缝衔接 */}
@@ -483,8 +474,8 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             </>
           )}
 
-          {/* 任务包：确认下发后出现，通道由人工选择——派给公司 或 生成直控任务指令 */}
-          {selected.pendingConfirm !== 1 && (
+          {/* 任务包：始终显示（含待确认任务）——通道由人工选择，选择时自动完成确认 */}
+          {(
             <div style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 4, border: '1px solid var(--border)' }}>
               <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>任务包</div>
               {selected.orders?.length > 0 && (
