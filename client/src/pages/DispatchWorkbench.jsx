@@ -435,16 +435,6 @@ const TasksTab = React.memo(function TasksTab({ tasks, selected, openTask, runCa
 
 
           {/* 执行链路指引（状态驱动）：让 AI 下单与工作台操作无缝衔接 */}
-          {selected.source === '对话下单' && (
-            <div style={{ margin: '8px 0 12px', padding: '8px 12px', borderRadius: 4, fontSize: 12,
-              background: 'rgba(45,212,167,0.08)', border: '1px solid rgba(45,212,167,0.3)', color: 'var(--text-dim)' }}>
-              🤖 本任务由 AI 下单助手创建。
-              {selected.status === '待派单' && !selected.rankings?.length && <span> 下一步：点击上方 <b style={{color:'var(--accent)'}}>① 候选计算</b>，再 <b style={{color:'var(--accent)'}}>② 派单分流</b>（也可回 AI 助手说"继续"让它驱动）。</span>}
-              {selected.status === '待派单' && selected.rankings?.length && <span> 候选已就绪，下一步：<b style={{color:'var(--accent)'}}>② 派单分流</b>。</span>}
-              {(selected.status === '已派发' || selected.status === '已接单' || selected.status === '执行中') && <span> 已进入订单执行，进度在 <b style={{color:'var(--accent)'}}>「订单跟踪」</b>Tab 管理或在下方"关联订单"推进。</span>}
-              {(selected.status === '已验收' || selected.status === '已失败') && <span> 本任务已结束，可在「订单跟踪」查看履约记录。</span>}
-            </div>
-          )}
 
           {/* 排序清单 */}
           {selected.rankings?.length > 0 && (
@@ -507,13 +497,9 @@ const TasksTab = React.memo(function TasksTab({ tasks, selected, openTask, runCa
                     }}>{busy ? '执行中…' : '生成直控任务指令'}</button>
                 </div>
               )}
-              {['直控执行中', '已派发', '已接单', '待核验下发', '方案已确认', '已上注'].includes(selected.status) && (
+              {(selected.directPlans?.length ?? 0) > 0 && (
                 <button className="btn secondary" style={{ padding: '3px 12px', fontSize: 11.5 }}
-                  onClick={async () => {
-                    await load();
-                    setTab('plans');
-                    setMsg({ ok: true, text: '已切换到直控方案 Tab，本任务的参数包见对应方案卡片' });
-                  }}>查看直控参数包 →</button>
+                  onClick={() => { setTab('plans'); setMsg({ ok: true, text: '直控方案见「直控方案」Tab' }); }}>查看直控参数包 →</button>
               )}
             </div>
           )}
