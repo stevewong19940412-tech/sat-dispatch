@@ -53,7 +53,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
       const interacting = document.querySelector('.modal-overlay') ||
         document.querySelector('button:hover') || document.querySelector('div[style*="cursor: pointer"]:hover');
       if (!interacting) load();
-    }, 15000);
+    }, 30000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -355,7 +355,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 }
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
-function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode }) {
+const TasksTab = React.memo(function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode }) {
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
@@ -391,7 +391,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
 
       {/* 任务详情 */}
       {selected && (
-        <div style={{ flex: 1, border: '1px solid var(--border-bright)', borderRadius: 6, padding: 16, alignSelf: 'flex-start', position: 'sticky', top: 0 }}>
+        <div style={{ flex: 1, border: '1px solid var(--border-bright)', borderRadius: 6, padding: 16, alignSelf: 'flex-start', position: 'sticky', top: 0, maxHeight: 'calc(100vh - 60px)', overflowY: 'auto' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
             <b style={{ fontFamily: 'var(--font-display)', fontSize: 15, color: 'var(--text-bright)' }}>{selected.taskName}</b>
             <span className="status-pill" style={{ background: (TASK_STATUS_COLOR[selected.status] ?? '#888') + '22', color: TASK_STATUS_COLOR[selected.status] }}>{selected.status}</span>
@@ -432,12 +432,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             );
           })()}
 
-          {selected.pendingConfirm === 1 && (
-            <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 4, fontSize: 12.5,
-              background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.4)', color: 'var(--text-bright)' }}>
-              ⚠ 该任务由 AI 创建，尚未人工确认下发。核对 AOI 与任务要素后，在下方「任务包」选择下发方式（选择时自动完成确认）。
-            </div>
-          )}
+
           {/* 执行链路指引（状态驱动）：让 AI 下单与工作台操作无缝衔接 */}
           {selected.source === '对话下单' && (
             <div style={{ margin: '8px 0 12px', padding: '8px 12px', borderRadius: 4, fontSize: 12,
@@ -571,7 +566,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
       )}
     </div>
   );
-}
+});
 
 // ─── 订单跟踪 Tab ─────────────────────────────────────────────────────────
 function OrdersTab({ orders, advanceOrder }) {
