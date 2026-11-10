@@ -186,6 +186,19 @@ CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
     console.log("[schema] candidates.cloudSource 列已自动迁移");
   }
   const cndCols = db.prepare("PRAGMA table_info(candidates)").all().map(c => c.name);
+  // capacity 真实口径校准：旧演示值(200/120/100/80/60/40)→按星座在轨规模的单月接单量级（公开资料）
+  {
+    const REAL_CAP = {
+      '长光卫星': 30000,     // 吉林一号100+星，官网口径全球日重访
+      '资源卫星中心': 8000,  // 统管ZY/GF/CBERS系列
+      '中国四维': 5000,      // SUPERVIEW/NEO商业星座
+      '航天宏图': 3000,      // PIESAT SAR+光学星座
+      '世纪空间': 1500,      // 北京系列
+      '卫星气象中心': 1000,  // FY气象
+    };
+    const upd = db.prepare("UPDATE companies SET capacity=? WHERE short=? AND capacity < 1000");
+    for (const [short, cap] of Object.entries(REAL_CAP)) upd.run(cap, short);
+  }
   if (!cndCols.includes("sunElDeg")) {
     db.exec("ALTER TABLE candidates ADD COLUMN sunElDeg REAL");
     console.log("[schema] candidates.sunElDeg 列已自动迁移");

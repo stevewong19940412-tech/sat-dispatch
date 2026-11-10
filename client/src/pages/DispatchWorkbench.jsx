@@ -690,7 +690,7 @@ function PoolTab({ pool, companies, claimTask }) {
 function CompaniesTab({ companies }) {
   return (
     <table className="mission-table">
-      <thead><tr><th>公司</th><th>性质</th><th>简介</th><th>报备容量</th><th>已承接</th><th>承载余量</th><th>履约完成率</th><th>数据档位</th></tr></thead>
+      <thead><tr><th>公司</th><th>性质</th><th>简介</th><th title="按星座在轨规模估算的单月可接单景数量级（公开资料）">月接单容量*</th><th>已承接</th><th>承载余量</th><th>履约完成率</th><th>数据档位</th></tr></thead>
       <tbody>
         {companies.map(c => (
           <tr key={c.id}>
