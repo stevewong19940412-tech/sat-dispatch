@@ -15,6 +15,12 @@ import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// 请求日志（排障用：确认UI点击是否到达服务端）
+app.use((req, res, next) => {
+  if (req.method === 'POST') console.log(`[req] ${req.method} ${req.path} ${new Date().toISOString().slice(11,19)}`);
+  next();
+});
 app.use(express.json());
 
 // ─── API ──────────────────────────────────────────────────────────────────
