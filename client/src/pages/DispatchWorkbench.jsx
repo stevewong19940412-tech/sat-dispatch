@@ -195,7 +195,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                 { key: 'inquiry', title: '向所有候选公司发起竞价', desc: `候选公司 ${new Set((assignMode.rankings ?? []).map(r => r.company)).size} 家，报价后人工定标`, act: 'inquiry' },
                 { key: 'pool', title: '挂入任务池让公司抢单', desc: '符合条件的公司自行认领，适合小额碎片任务', act: 'pool' },
               ].map(opt => (
-                <div key={opt.key} onClick={async () => {
+                <button key={opt.key} onClick={async () => {
                   try {
                     if (opt.act === 'top1') {
                       const d = await api(`/dispatch/tasks/${assignMode.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '指派' }) });
@@ -210,12 +210,12 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                     setAssignMode(null);
                     await openTask(assignMode.id);
                   } catch (e) { setMsg({ ok: false, text: e.message }); }
-                }} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: '10px 12px', marginBottom: 8, cursor: 'pointer' }}
+                }} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: '10px 12px', marginBottom: 8, cursor: 'pointer', width: '100%', textAlign: 'left', background: 'transparent', color: 'inherit' }}
                   onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--accent)'}
                   onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--border)'}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)' }}>{opt.title}</div>
                   <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>{opt.desc}</div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
