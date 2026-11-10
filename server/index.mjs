@@ -189,6 +189,7 @@ app.use("/api/dispatch", dispatchApi);
 
 // ─── 静态文件（构建产物） ─────────────────────────────────────────────────
 // 部署态：client-dist 平铺在 runtime 根；开发态：../client/dist
+import { readdirSync } from "fs";
 const distDir = existsSync(join(__dirname, "..", "client-dist"))
   ? join(__dirname, "..", "client-dist")
   : join(__dirname, "..", "client", "dist");
@@ -198,6 +199,16 @@ app.use(express.static(distDir, {
     if (path.endsWith(".html")) res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   },
 }));
+// 旧构建 hash 请求一律 410 Gone：配合浏览器放弃缓存旧JS（用户强刷一次后永不再遇）
+app.use((req, res, next) => {
+  const m = req.path.match(/^\/assets\/(index-[\w-]+\.js)$/);
+  if (m && !existsSync(join(distDir, 'assets', m[1]))) {
+    // 旧构建 hash 请求 → 302 到当前最新 index-*.js（浏览器缓存的旧HTML无需刷新即自动升级到新构建）
+    const latest = readdirSync(join(distDir, 'assets')).find(f => /^index-[\w-]+\.js$/.test(f));
+    if (latest) return res.redirect(302, `/assets/${latest}`);
+  }
+  next();
+});
 app.get("/*any", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
   res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
