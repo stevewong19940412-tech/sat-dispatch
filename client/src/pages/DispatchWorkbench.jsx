@@ -356,7 +356,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 }
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
-const TasksTab = React.memo(function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode }) {
+const TasksTab = React.memo(function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode, setMsg, setTab }) {
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
