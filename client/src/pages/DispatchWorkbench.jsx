@@ -203,6 +203,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
               ].map(opt => (
                 <button key={opt.key} onClick={async () => {
                   try {
+                    if (assignMode.pendingConfirm === 1) await api(`/dispatch/tasks/${assignMode.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
                     if (opt.act === 'top1') {
                       const d = await api(`/dispatch/tasks/${assignMode.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '指派' }) });
                       setMsg({ ok: true, text: `已指派 ${d.company ?? ''}（${d.orderNo ?? ''}）` });
