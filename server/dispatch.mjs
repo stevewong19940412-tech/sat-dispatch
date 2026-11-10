@@ -63,7 +63,7 @@ dispatchApi.post("/order-intake", async (req, res) => {
 
   // 幂等：同目标（中心±0.01°）+ 同窗口的活跃任务直接复用返回（不新建）
   const existing = db.prepare(
-    "SELECT id, taskNo, status FROM tasks WHERE status IN ('待派单','已派发','已接单') AND createdAt > datetime('now','-2 days')"
+    "SELECT id, taskNo, status, geom FROM tasks WHERE status IN ('待派单','已派发','已接单') AND createdAt > datetime('now','-2 days')"
   ).all().find(t => {
     try {
       const tg = JSON.parse(t.geom ?? "{}");
