@@ -48,6 +48,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   // 全局事件委托兜底：任务包按钮点击（绕过 React 合成事件在特定环境的兼容问题）
   useEffect(() => {
     const h = async (e) => {
+      // Tab 切换（data-tab）——与业务按钮同一委托通道
+      const tabBtn = e.target.closest?.('button[data-tab]');
+      if (tabBtn) { setTab(tabBtn.dataset.tab); return; }
       const btn = e.target.closest?.('button[data-action]');
       if (!btn || btn.disabled) return;
       const { action, taskId } = btn.dataset;
@@ -186,7 +189,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
       {/* Tab */}
       <div style={{ display: 'flex', gap: 4, padding: '10px 16px 0' }}>
         {[['tasks', '任务管理'], ['orders', '订单跟踪'], ['plans', '应急直控'], ['pool', '任务池'], ['companies', '公司生态']].map(([k, label]) => (
-          <button key={k} onClick={() => setTab(k)} style={{ background: 'transparent', border: 'none', color: 'inherit', font: 'inherit', padding: 0, cursor: 'pointer' }}
+          <button key={k} data-tab={k} style={{ background: 'transparent', border: 'none', color: 'inherit', font: 'inherit', padding: 0, cursor: 'pointer' }}
             style={{
               padding: '7px 18px', cursor: 'pointer', fontSize: 13,
               borderBottom: tab === k ? '2px solid var(--accent)' : '2px solid transparent',
