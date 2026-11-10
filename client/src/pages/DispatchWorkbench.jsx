@@ -290,7 +290,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                       const d = (new Date(pack.tca) - new Date(pack.sequenceStart)) / 1000; return Math.round(d);
                     })()}s）</div>
                     {(() => {
-                      const img = pack.commands.find(c => c.action === '成像');
+                      const img = (Array.isArray(pack.commands) ? pack.commands : []).find(c => c.action === '成像');
                       const ip = img?.param ?? {};
                       return (
                         <div style={{ fontSize: 11.5, color: 'var(--text-dim)', margin: '6px 0' }}>
