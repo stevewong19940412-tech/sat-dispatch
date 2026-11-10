@@ -39,6 +39,7 @@ export function scoreR(winCountInTask, overpassTime, windowStart, windowEnd, sle
 }
 
 // （3）任务完成能力 C = 0.5·c1 + 0.3·c2 + 0.2·c3
+// 权重依据：需求文档《遥感卫星统一调度系统-开发执行逻辑说明》第6节参数清单（c1履约率/c2数据质量/c3应用适配）
 export function scoreC(company) {
   const c = db.prepare("SELECT * FROM companies WHERE short=? OR name=?").get(company, company);
   if (!c) return { C: 0.6, Cdetail: { c1: 0.6, c2: 0.5, c3: 0.6, note: '公司未登记' } };

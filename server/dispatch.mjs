@@ -309,7 +309,17 @@ dispatchApi.post("/orders/:id/quote", (req, res) => {
   if (!list) {
     // 平台模拟报价：候选公司按能力给价
     const logs = db.prepare("SELECT company FROM dispatchLog WHERE orderId=? AND action='询价单发出'").all(order.id);
-    list = logs.map((l, i) => ({ company: l.company, price: Math.round((8 + i * 2.3) * 10) / 10, valid: true }));
+    // 报价解算（国内商业遥感公开行情量级）：基准价 = 分辨率系数 × 条带面积 × 单价
+    // 1m级 ~3万/千km²档，0.5m ~8万/千km²档，SAR 5m ~1.5万/千km²档；公司履约率±10%浮动
+    const t = db.prepare("SELECT resolution, obsType FROM tasks WHERE id=?").get(order.taskId);
+    const resM = t?.resolution ?? 2;
+    const base = resM <= 0.5 ? 8 : resM <= 1 ? 3 : resM <= 2 ? 1.5 : 0.8; // 万元/千km²
+    const areaK2 = 100; // 单条带约 12km×8s×7.5km/s≈100km² 量级
+    list = logs.map((l, i) => {
+      const cap = db.prepare("SELECT fulfillmentRate FROM companies WHERE short=?").get(l.company);
+      const adj = 1 + ((cap?.fulfillmentRate ?? 0.9) - 0.9) * 0.5; // 履约好的略高定价
+      return { company: l.company, price: Math.round(base * areaK2 / 100 * adj * 10) / 10, valid: true };
+    });
   }
   const valid = list.filter(q => q.valid);
   if (valid.length === 0) {
@@ -486,11 +496,14 @@ export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
   // 低轨卫星地面轨迹速度 ~7.5km/s，成像中点必须对准 TCA，否则指向误差达数百公里。
   const tca = new Date(plan.overpass ?? plan.overpassTime ?? windowStart).getTime();
   const slew = plan.slewDeg ?? 15;
-  const omegaMax = 1.0; // °/s 型号配置
-  const alphaMax = 0.5; // °/s²
+  // 姿态机动/稳定/预热按型号真实口径（payload_specs 调研库）：
+  // 机动速率 高分系0.13~0.19°/s、敏捷商业星0.5~1.5°/s；稳定5~20s；光学开机预热2~10min（取300s量级）
+  const spec = getPayloadSpec(plan.satName);
+  const omegaMax = spec?.slewRate ?? 1.0;             // °/s 型号真实值
+  const alphaMax = 0.5;                                // °/s² 典型
   const slewTime = Math.abs(slew) / omegaMax + omegaMax / alphaMax; // 机动时长公式
-  const stabilize = 3.0;   // 稳定 s
-  const warmup = 5.0;      // 开机预热 s
+  const stabilize = 10.0;  // 稳定 s（调研典型5~20s取中值）
+  const warmup = 300.0;    // 相机开机预热 s（光学调研典型2~10min，取5min量级；星上常开制冷按光路准备计）
   // 成像时长：以「成像覆盖窗」（幅宽半宽内能拍到目标的秒级区间）为准，
   // 不再按窗口长×0.6 或固定值——GAOFEN-14 近正过顶时覆盖窗可能只有 1~5s，
   // 拍 20s 会飞出幅宽 300km。成像中点对准 TCA，时长=覆盖窗时长（保底 1s，封顶 20s）。
