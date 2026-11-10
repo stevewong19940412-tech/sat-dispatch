@@ -105,8 +105,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
       if (action === 'generate') {
         const r = await api(`/dispatch/plans/${planId}/generate`, { method: 'POST' });
         setMsg({ ok: r.validation.pass, text: r.validation.pass
-          ? `指令包生成并通过独立校验（${r.commands.length} 条动作，总时长 ${r.validation.totalDuration}s）`
-          : `校验驳回：${r.validation.errors.join('；')}` });
+          ? `✅ 参数包已生成并通过校验（${r.commands.length} 条动作，总时长 ${r.validation.totalDuration}s）——下方方案卡片状态已更新为「待核验下发」`
+          : `❌ 校验驳回：${r.validation.errors.join('；')}` });
+        await load();
       } else if (action === '方案' || action === '上注') {
         await api(`/dispatch/plans/${planId}/confirm`, { method: 'POST', body: JSON.stringify({ stage: action }) });
       } else if (action === 'complete') {
@@ -498,18 +499,23 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                   <button className="btn danger" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
                     onClick={async () => {
                       try {
+                        setMsg({ ok: true, text: '正在建立直控方案' + (!selected.rankings?.length ? '（含候选计算，约30秒）…' : '…') });
                         if (!selected.rankings?.length) await runCandidates(selected.id);
                         const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '直控' }) });
-                        setMsg({ ok: true, text: '直控方案已建立，在下方「直控执行方案」生成参数包并核验上注' });
+                        setMsg({ ok: true, text: '✅ 直控方案已建立！正在生成参数包…' });
                         setTab('plans');
                         await openTask(selected.id);
-                      } catch (e) { setMsg({ ok: false, text: e.message }); }
-                    }}>生成直控任务指令</button>
+                      } catch (e) { setMsg({ ok: false, text: '直控建立失败：' + e.message }); }
+                    }}>{busy ? '执行中…' : '生成直控任务指令'}</button>
                 </div>
               )}
-              {selected.status === '直控执行中' && (
+              {['直控执行中', '已派发', '已接单', '待核验下发', '方案已确认', '已上注'].includes(selected.status) && (
                 <button className="btn secondary" style={{ padding: '3px 12px', fontSize: 11.5 }}
-                  onClick={() => setTab('plans')}>查看直控参数包 →</button>
+                  onClick={async () => {
+                    await load();
+                    setTab('plans');
+                    setMsg({ ok: true, text: '已切换到直控方案 Tab，本任务的参数包见对应方案卡片' });
+                  }}>查看直控参数包 →</button>
               )}
             </div>
           )}
@@ -640,7 +646,7 @@ function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
           )}
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'generate')}>
-              {p.status === '待确认' ? '① 计算直控参数包' : '重算参数包'}
+              {busy ? '⏳ 解算中（约10~30秒）…' : p.status === '待确认' ? '① 计算直控参数包' : '重算参数包'}
             </button>
             {p.status === '待核验下发' && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, '方案')}>② 方案确认（值班）</button>}
             {p.status === '方案已确认' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }}
