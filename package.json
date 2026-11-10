@@ -8,7 +8,8 @@
     "dev:client": "vite --strictPort",
     "build": "vite build",
     "start": "node server/index.mjs",
-    "seed": "node scripts/seed.mjs"
+    "seed": "node scripts/seed.mjs",
+    "prebuild": "python3 scripts/update_stamp.py"
   },
   "dependencies": {
     "@blade-hq/agent-client": "file:/root/项目/全球开源情报工作台/redroom-osint-workbench/vendor/blade-hq-agent-client.tgz",
