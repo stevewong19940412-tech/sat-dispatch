@@ -103,7 +103,7 @@ dispatchApi.get("/tasks/:id", (req, res) => {
   if (!t) return res.status(404).json({ error: 'task not found' });
   t.geom = JSON.parse(t.geom);
   t.rankings = db.prepare(`
-    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.cloudSource, c.orbitGrade, c.stripIdx, c.stripCount, c.minDistKm, c.imgWinStart, c.imgWinEnd
+    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.cloudSource, c.orbitGrade, c.stripIdx, c.stripCount, c.minDistKm, c.imgWinStart, c.imgWinEnd, c.sunElDeg
     FROM rankings r JOIN candidates c ON c.id = r.candidateId
     WHERE r.taskId=? ORDER BY r.rank LIMIT 30`).all(t.id);
   t.orders = db.prepare("SELECT * FROM orders WHERE taskId=? ORDER BY id DESC").all(t.id);
@@ -145,8 +145,8 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
 
   db.prepare("DELETE FROM candidates WHERE taskId=?").run(task.id);
   const ins = db.prepare(`INSERT INTO candidates (taskId,stripIdx,stripCount,satNoradId,satName,company,
-      windowStart,windowEnd,overpassTime,slewDeg,availability,cloudFc,orbitGrade,filtered,filterReason,validRes, cloudSource, minDistKm, imgWinStart, imgWinEnd)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      windowStart,windowEnd,overpassTime,slewDeg,availability,cloudFc,orbitGrade,filtered,filterReason,validRes, cloudSource, sunElDeg, minDistKm, imgWinStart, imgWinEnd)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
   const winStartT = new Date(task.windowStart).getTime();
   const leadDays = Math.max(0, (winStartT - tCreated.getTime()) / 86400000);
@@ -178,6 +178,7 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           overpass.toISOString(), Math.round(w.slewDeg * 10) / 10,
           Math.round(availability * 10) / 10, Math.round(cloud * 1000) / 1000,
           '高', pass ? 0 : 1, pass ? null : reasons.join('；'), Math.round(validRes * 100) / 100, cloudSrc,
+          Math.round(solarElevationDegFor(strip.lat, strip.lon, overpass) * 10) / 10,
           Math.round(w.minDistKm * 10) / 10,
           w.imgWinStart ? new Date(w.imgWinStart).toISOString() : null,
           w.imgWinEnd ? new Date(w.imgWinEnd).toISOString() : null);
@@ -227,7 +228,7 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   const ranking = db.prepare(`
-    SELECT r.*, c.satName, c.company, c.satNoradId, c.overpassTime, c.windowStart, c.windowEnd, c.availability, c.minDistKm, c.imgWinStart, c.imgWinEnd
+    SELECT r.*, c.satName, c.company, c.satNoradId, c.overpassTime, c.windowStart, c.windowEnd, c.availability, c.minDistKm, c.imgWinStart, c.imgWinEnd, c.sunElDeg
     FROM rankings r JOIN candidates c ON c.id=r.candidateId
     WHERE r.taskId=? AND c.filtered=0 ORDER BY r.rank`).all(task.id);
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });

@@ -350,7 +350,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
         <table className="mission-table">
           <thead><tr><th>任务编号</th><th>任务名称</th><th>类型</th><th>分辨率</th><th>优先级</th><th>状态</th><th>来源</th><th>操作</th></tr></thead>
           <tbody>
-            {tasks.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: 20 }}>暂无任务，点击右上角「新建任务」创建</td></tr>}
+            {tasks.length === 0 && <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: 20 }}>暂无任务，点击右上角「新建任务」创建</td></tr>}
             {tasks.map(t => (
               <tr key={t.id} onClick={() => openTask(t.id)} style={{ background: selected?.id === t.id ? 'rgba(45,212,167,0.08)' : undefined }}>
                 <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{t.taskNo}</td>
@@ -446,7 +446,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             <>
               <div className="section-label">候选卫星优先级排序</div>
               <table className="mission-table" style={{ fontSize: 11.5 }}>
-                <thead><tr><th>#</th><th>卫星</th><th>公司</th><th>过顶时刻</th><th>侧摆</th><th>云量</th><th>可用度</th><th>优先级评分</th></tr></thead>
+                <thead><tr><th>#</th><th>卫星</th><th>公司</th><th>过顶时刻</th><th>侧摆</th><th>云量</th><th>太阳角</th><th>可用度</th><th>优先级评分</th></tr></thead>
                 <tbody>
                   {selected.rankings.slice(0, 12).map(r => (
                     <tr key={r.id}>
@@ -457,6 +457,10 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                       <td style={{ fontFamily: 'var(--font-mono)' }}>{r.slewDeg?.toFixed(0)}°</td>
                       <td style={{ fontFamily: 'var(--font-mono)' }} title={r.cloudSource === 'real' ? '真实气象预报 (open-meteo)' : '内置模拟气象场（超出72h预报窗）'}>
                         {(r.cloudFc * 100).toFixed(0)}%{r.cloudSource === 'real' ? ' 🛰' : ''}
+                      </td>
+                      <td style={{ fontFamily: 'var(--font-mono)', color: (r.sunElDeg ?? 40) >= 10 ? 'var(--text-dim)' : 'var(--danger)' }}
+                        title={(r.sunElDeg ?? 40) >= 10 ? '光照满足（≥10°）' : '光照不足'}>
+                        {r.sunElDeg != null ? `${r.sunElDeg.toFixed(0)}°` : '—'}
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)' }}>{r.availability}</td>
                       <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)', fontWeight: 600 }}>{Number(r.S).toFixed(1)}</td>

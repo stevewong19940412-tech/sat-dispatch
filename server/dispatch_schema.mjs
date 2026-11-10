@@ -186,6 +186,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
     console.log("[schema] candidates.cloudSource 列已自动迁移");
   }
   const cndCols = db.prepare("PRAGMA table_info(candidates)").all().map(c => c.name);
+  if (!cndCols.includes("sunElDeg")) {
+    db.exec("ALTER TABLE candidates ADD COLUMN sunElDeg REAL");
+    console.log("[schema] candidates.sunElDeg 列已自动迁移");
+  }
   if (!cndCols.includes("minDistKm")) {
     db.exec("ALTER TABLE candidates ADD COLUMN minDistKm REAL");
     console.log("[schema] candidates.minDistKm 列已自动迁移");
