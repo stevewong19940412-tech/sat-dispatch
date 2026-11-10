@@ -45,6 +45,35 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
     setPool(prev => same(prev, pl) ? prev : pl);
   }, []);
 
+  // 全局事件委托兜底：任务包按钮点击（绕过 React 合成事件在特定环境的兼容问题）
+  useEffect(() => {
+    const h = async (e) => {
+      const btn = e.target.closest?.('button[data-action]');
+      if (!btn || btn.disabled) return;
+      const { action, taskId } = btn.dataset;
+      const t = tasks.find(x => x.id === +taskId);
+      if (!t) return;
+      e.preventDefault(); e.stopPropagation();
+      try {
+        if (t.pendingConfirm === 1) await api(`/dispatch/tasks/${t.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
+        if (action === 'assign-open') { setAssignMode(t); return; }
+        if (!t.rankings?.length) await runCandidates(t.id);
+        const fresh = await api(`/dispatch/tasks/${t.id}`);
+        if (!fresh.rankings?.length) { setMsg({ ok: false, text: '该任务候选为 0（分辨率/云量/光照无满足者），无法派单' }); return; }
+        const channel = action === 'assign-top1' ? '指派' : action === 'assign-inquiry' ? '询价' : action === 'assign-pool' ? '抢单' : '直控';
+        const d = await api(`/dispatch/tasks/${t.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel }) });
+        if (action === 'direct') {
+          setMsg({ ok: true, text: '✅ 直控方案已建立，正在打开参数包…' });
+          setTab('plans');
+        } else {
+          setMsg({ ok: true, text: `已派给公司：主单 ${d.orderNo ?? ''}${(d.inquiries ?? []).length ? '，询价 ' + d.inquiries.length + ' 家' : ''}` });
+        }
+        await load(); await openTask(t.id);
+      } catch (e2) { setMsg({ ok: false, text: e2.message }); }
+    };
+    document.addEventListener('click', h, true);
+    return () => document.removeEventListener('click', h, true);
+  }, [tasks]);
   useEffect(() => {
     load();
     // 轮询节流：弹窗打开或鼠标悬停在可点击元素上时跳过本轮刷新，
@@ -485,16 +514,7 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                       } catch (e) { setMsg({ ok: false, text: e.message }); }
                     }}>派给公司</button>
                   <button className="btn danger" style={{ padding: '3px 12px', fontSize: 11.5 }} disabled={busy}
-                    onClick={async () => {
-                      try {
-                        setMsg({ ok: true, text: '正在建立直控方案' + (!selected.rankings?.length ? '（含候选计算，约30秒）…' : '…') });
-                        if (!selected.rankings?.length) await runCandidates(selected.id);
-                        const d = await api(`/dispatch/tasks/${selected.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '直控' }) });
-                        setMsg({ ok: true, text: '✅ 直控方案已建立！正在生成参数包…' });
-                        setTab('plans');
-                        await openTask(selected.id);
-                      } catch (e) { setMsg({ ok: false, text: '直控建立失败：' + e.message }); }
-                    }}>{busy ? '执行中…' : '生成直控任务指令'}</button>
+                    data-action="direct" data-task-id={selected.id}>{busy ? '执行中…' : '生成直控任务指令'}</button>
                 </div>
               )}
               {(selected.directPlans?.length ?? 0) > 0 && (
