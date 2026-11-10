@@ -409,8 +409,13 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                 <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--accent)', marginBottom: 4 }}>成像目标 AOI（解算值）</div>
                 <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-bright)' }}>
                   {g?.lat != null
-                    ? `点目标 ${Number(g.lat).toFixed(4)}°, ${Number(g.lon).toFixed(4)}°`
-                    : g?.coords ? `面目标 ${g.coords.length} 个顶点多条带` : '—'}
+                    ? `点目标 ${Number(g.lat).toFixed(4)}°, ${Number(g.lon).toFixed(4)}°（单景覆盖）`
+                    : g?.coords ? (() => {
+                        const lats = g.coords.map(c=>c[0]); const lons = g.coords.map(c=>c[1]);
+                        const dLatKm = (Math.max(...lats)-Math.min(...lats)) * 111;
+                        const dLonKm = (Math.max(...lons)-Math.min(...lons)) * 111 * Math.cos(g.coords[0][0]*Math.PI/180);
+                        return `面目标 ${g.coords.length} 顶点（约 ${dLatKm.toFixed(0)}km × ${dLonKm.toFixed(0)}km），将拆 ${Math.ceil(Math.max(dLatKm,dLonKm)/12)} 条带覆盖`;
+                      })() : '—'}
                 </div>
                 {topRank?.imgWinStart && (
                   <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>

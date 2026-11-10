@@ -10,10 +10,12 @@ const EARTH_R = 6371;
 // 点目标单条带；面目标按幅宽沿垂直航向拆分（简化实现：以 AOI 外接圆估条带数）
 export function normalizeTaskStrips(task, swathKm = 12) {
   const geom = JSON.parse(task.geom);
+  // 目标三分类（成像任务规划标准口径）：点目标（单景覆盖）/ 线目标 / 面目标（需拆条带）
+  // point = 点；area|polygon = 面；其它一律按面兜底（避免区域需求被静默降级成点）
   if (task.geomType === 'point') {
     return [{ idx: 1, count: 1, lat: geom.lat, lon: geom.lon, radiusKm: 1 }];
   }
-  // polygon：质心 + 半径（用于可见窗判定的等效圆，条带数按直径/幅宽）
+  // 面目标（area/polygon）：质心 + 半径（用于可见窗判定的等效圆，条带数按直径/幅宽）
   const coords = geom.coords;
   let latSum = 0, lonSum = 0;
   for (const [la, lo] of coords) { latSum += la; lonSum += lo; }
