@@ -233,6 +233,14 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                 <button key={opt.key} onClick={async () => {
                   try {
                     if (assignMode.pendingConfirm === 1) await api(`/dispatch/tasks/${assignMode.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
+                    if ((assignMode.rankings ?? []).length === 0) {
+                      setMsg({ ok: true, text: '该任务候选为 0，正在后台计算候选（约30秒）…' });
+                      setAssignMode(null);
+                      runCandidates(assignMode.id).then(() =>
+                        setMsg({ ok: true, text: '候选计算完成，请重新点「派给公司」选择派单方式' }));
+                      return;
+                    }
+                    setMsg({ ok: true, text: '正在' + (opt.act === 'top1' ? '指派' : opt.act === 'inquiry' ? '发起竞价' : '挂入任务池') + '…' });
                     if (opt.act === 'top1') {
                       const d = await api(`/dispatch/tasks/${assignMode.id}/dispatch`, { method: 'POST', body: JSON.stringify({ channel: '指派' }) });
                       setMsg({ ok: true, text: `已指派 ${d.company ?? ''}（${d.orderNo ?? ''}）` });
@@ -301,7 +309,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                     <table className="mission-table" style={{ fontSize: 10.5, margin: '4px 0 8px' }}>
                       <thead><tr><th>#</th><th>动作</th><th>偏移</th><th>时长</th></tr></thead>
                       <tbody>
-                        {pack.commands.map(c => (
+                        {(Array.isArray(pack.commands) ? pack.commands : []).map(c => (
                           <tr key={c.seq}><td>{c.seq}</td><td>{c.action}</td>
                             <td style={{ fontFamily: 'var(--font-mono)' }}>{c.startOffset}s</td>
                             <td style={{ fontFamily: 'var(--font-mono)' }}>{c.duration}s</td></tr>
@@ -623,7 +631,7 @@ function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
           {/* 指令时间轴 */}
           {p.commands && (
             <div style={{ display: 'flex', gap: 4, margin: '8px 0', flexWrap: 'wrap', alignItems: 'center' }}>
-              {p.commands.map(c => (
+              {(Array.isArray(p.commands) ? p.commands : []).map(c => (
                 <React.Fragment key={c.seq}>
                   <span style={{ padding: '3px 10px', borderRadius: 3, fontSize: 11, fontFamily: 'var(--font-mono)',
                     background: c.action === '成像' ? 'rgba(45,212,167,0.15)' : 'rgba(56,88,140,0.25)',
