@@ -270,7 +270,7 @@ dispatchApi.post("/tasks/batch", async (req, res) => {
 // AI 建单联动：最近 3 分钟内由 AI 创建的任务（供工作台自动打开）
 // CLI 版本对账（旧副本自愈：CLI 启动时对比，旧则提示 --self-update）
 dispatchApi.get("/cli-version", (req, res) => {
-  res.json({ version: 6 });
+  res.json({ version: 7 });
 });
 
 dispatchApi.get("/latest", async (req, res) => {
