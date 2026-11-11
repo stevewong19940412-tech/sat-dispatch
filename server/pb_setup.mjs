@@ -177,6 +177,36 @@ export async function runSetup() {
   } else {
     console.log("[pb_setup] 已迁移过（migration_done=1），跳过数据灌入");
   }
+  // relation 字段自愈：首启降级为 number 的 relation 字段 PATCH 回 relation
+  await auth();
+  const cols2 = await api("/api/collections");
+  const arr2 = cols2.items || cols2;
+  const REL_FIELDS = [
+    { table: "candidates", field: "task", target: "tasks" },
+    { table: "rankings", field: "task", target: "tasks" },
+    { table: "rankings", field: "candidate", target: "candidates" },
+    { table: "orders", field: "task", target: "tasks" },
+    { table: "directPlans", field: "task", target: "tasks" },
+    { table: "fulfillmentLog", field: "task", target: "tasks" },
+    { table: "taskPool", field: "task", target: "tasks" },
+    { table: "dispatchLog", field: "task", target: "tasks" },
+    { table: "dispatchLog", field: "order", target: "orders" },
+  ];
+  let fixedRel = 0;
+  for (const spec of REL_FIELDS) {
+    const col = arr2.find(c => c.name === spec.table);
+    if (!col) continue;
+    const f = col.fields.find(x => x.name === spec.field);
+    if (!f || f.type === "relation") continue;
+    const target = arr2.find(c => c.name === spec.target);
+    if (!target) continue;
+    const newFields = col.fields.map(x => x.name === spec.field
+      ? { name: spec.field, type: "relation", collectionId: target.id, cascadeDelete: false, maxSelect: 1 }
+      : x);
+    const r = await api(`/api/collections/${col.id}`, "PATCH", { fields: newFields });
+    if (r.id) { fixedRel++; console.log(`[pb_setup] [${spec.table}.${spec.field}] ${f.type} → relation 自愈`); }
+  }
+  if (fixedRel) console.log(`[pb_setup] relation 自愈 ${fixedRel} 个字段`);
   console.log(`[pb_setup] 完成 (${((Date.now()-t0)/1000).toFixed(1)}s): ${summary.join(' ')}`);
   return { ok: allOk, summary };
 }
