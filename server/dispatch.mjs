@@ -1,7 +1,42 @@
 // ─── 调度主服务：任务受理 → 候选计算 → 优先级 → 派单/直控 ────────────────
 import express from "express";
 import { db } from "./db.mjs";
-import { nextTaskNo, nextOrderNo } from "./dispatch_schema.mjs";
+import { nextOrderNo } from "./dispatch_schema.mjs";
+import {
+  pbList, pbAll, pbGet, pbRecordId, pbCreate, pbUpdate, pbDelete, pbBatch, pbNextSeq,
+} from "./pb_repo.mjs";
+
+// ─── PocketBase 迁移辅助（T1 读路径切换）──────────────────────────────────
+// 响应兼容约定：旧数字 id 继续作为 JSON 的 id 字段（oldId 回填），
+// 关系记录（orders/directPlans/taskPool）的 taskId 同理回填，前端无需改动。
+const pbNow = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+const pbYmd = () => {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+};
+const pbTaskNo = (seq) => `RSBH-${pbYmd()}-${String(seq).padStart(3, "0")}`;
+// PB 记录 → 旧 API 行：id 回填 oldId（新建无迁移映射时直接用 PB record id）
+const pbTaskRow = (r) => ({ ...r, id: r.oldId ?? r.id, createdAt: r.createdAt || "0000-00-00 00:00:00" });
+const pbRelRow = (r) => ({ ...r, id: r.oldId ?? r.id, taskId: r.expand?.task?.oldId ?? null });
+// 新任务 oldId 分配：迁移库最大 oldId 之上递增，保证响应 id 与旧数字空间不冲突
+// （PB 未设置的 number 字段读回是 0，不能用 0 作新建标记——迁移库存在 oldId=0 残留）
+let _oldIdSeed = null;
+async function pbNextOldId() {
+  if (_oldIdSeed == null) {
+    const rows = await pbAll("tasks", { filter: "oldId>0", fields: "id,oldId" });
+    _oldIdSeed = rows.reduce((m, r) => Math.max(m, r.oldId ?? 0), 0);
+  }
+  return ++_oldIdSeed;
+}
+// 兼容两种 id：纯数字=旧迁移 id（oldId 回查），字符串=PB record id（新任务直用）
+async function pbResolveTask(idParam) {
+  const s = String(idParam ?? "");
+  if (/^\d+$/.test(s)) {
+    const rid = await pbRecordId("tasks", +s);
+    return rid ? { rid, oldId: +s } : null;
+  }
+  return s ? { rid: s, oldId: null } : null;
+}
 import {
   normalizeTaskStrips, computeVisibleWindows, forecastCloud, cloudEffective,
   applyConstraints, getCapability, haversineKm, DEFAULT_CAPS,
@@ -120,17 +155,18 @@ dispatchApi.post("/order-intake", async (req, res) => {
   });
 });
 
-dispatchApi.post("/tasks/:id/confirm", (req, res) => {
-  const t = db.prepare("SELECT * FROM tasks WHERE id=?").get(+req.params.id);
+dispatchApi.post("/tasks/:id/confirm", async (req, res) => {
+  const ref = await pbResolveTask(req.params.id);
+  if (!ref) return res.status(404).json({ error: 'task not found' });
+  const t = await pbGet("tasks", ref.rid);
   if (!t) return res.status(404).json({ error: 'task not found' });
   if (t.status !== '待派单') return res.status(400).json({ error: `状态 ${t.status} 不可确认下发` });
-  db.prepare("UPDATE tasks SET pendingConfirm=0 WHERE id=?").run(t.id);
-  db.prepare(`INSERT INTO dispatchLog (taskId, action, detail) VALUES (?, '人工确认下发', ?)`)
-    .run(t.id, req.body?.note ?? '人工确认下发任务');
+  await pbUpdate("tasks", t.id, { pendingConfirm: 0 });
+  await pbCreate("dispatchLog", { task: t.id, action: '人工确认下发', detail: req.body?.note ?? '人工确认下发任务', at: pbNow() });
   res.json({ ok: true, status: '已确认待派发' });
 });
 
-dispatchApi.post("/tasks", (req, res) => {
+dispatchApi.post("/tasks", async (req, res) => {
   const b = req.body ?? {};
   const task = {
     taskName: b.taskName || '未命名任务',
@@ -155,62 +191,63 @@ dispatchApi.post("/tasks", (req, res) => {
   };
   const errors = validateTask(task);
   if (errors.length) return res.status(400).json({ error: '生成校验不通过', errors });
-  task.taskNo = nextTaskNo();
+  task.taskNo = pbTaskNo(await pbNextSeq("taskNo"));
   task.pendingConfirm = (task.source === '对话下单' || req.body?.source === '对话下单') ? 1 : 0;
-  const r = db.prepare(`INSERT INTO tasks (taskNo,taskName,source,targetName,targetType,geomType,geom,
-      obsType,resolution,spectral,windowStart,windowEnd,maxCloud,maxSlewDeg,timelinessHours,
-      priority,isEmergency,taskPhase,confidence,parseNote,pendingConfirm)
-    VALUES (@taskNo,@taskName,@source,@targetName,@targetType,@geomType,@geom,
-      @obsType,@resolution,@spectral,@windowStart,@windowEnd,@maxCloud,@maxSlewDeg,@timelinessHours,
-      @priority,@isEmergency,@taskPhase,@confidence,@parseNote,@pendingConfirm)`).run(task);
-  res.json({ ...task, id: r.lastInsertRowid, status: '待派单' });
+  task.status = '待派单';
+  task.createdAt = pbNow();
+  task.oldId = await pbNextOldId();
+  await pbCreate("tasks", task);
+  res.json({ ...task, id: task.oldId, status: '待派单' });
 });
 
 // 批量建单（工程侧刚性入口）：格网测绘类任务一次 N 条，单事务原子落库。
 // 解决「AI 说生成了 N 个任务但列表里一个都没有」——AI 文本输出不算数，
 // 只有本接口返回的 created 数组才是事实。逐条返回 成功(taskId/taskNo)/失败(errors)
-dispatchApi.post("/tasks/batch", (req, res) => {
+dispatchApi.post("/tasks/batch", async (req, res) => {
   const items = Array.isArray(req.body?.tasks) ? req.body.tasks : null;
   if (!items || items.length === 0) return res.status(400).json({ error: 'body 须为 {tasks:[...]}，至少 1 条' });
   if (items.length > 500) return res.status(400).json({ error: `单次上限 500 条（收到 ${items.length}），分批调用` });
   const created = [], failed = [];
-  const tx = db.transaction(() => {
-    for (const b of items) {
-      const task = {
-        taskName: b.taskName || '未命名任务',
-        source: b.source ?? '对话下单',
-        targetName: b.targetName,
-        targetType: b.targetType,
-        geomType: b.geomType === 'area' ? 'polygon' : b.geomType,
-        geom: typeof b.geom === 'string' ? b.geom : JSON.stringify(b.geom),
-        obsType: b.obsType,
-        resolution: b.resolution != null ? parseFloat(b.resolution) : null,
-        spectral: b.spectral,
-        windowStart: b.windowStart,
-        windowEnd: b.windowEnd,
-        maxCloud: b.maxCloud != null ? parseFloat(b.maxCloud) : 0.3,
-        maxSlewDeg: b.maxSlewDeg != null ? parseFloat(b.maxSlewDeg) : 45,
-        timelinessHours: b.timelinessHours != null ? parseFloat(b.timelinessHours) : null,
-        priority: b.priority ?? '常规',
-        isEmergency: b.priority === '应急' || b.isEmergency ? 1 : 0,
-        taskPhase: b.taskPhase ?? '未来成像',
-        confidence: b.confidence ? JSON.stringify(b.confidence) : null,
-        parseNote: b.parseNote,
-      };
-      const errors = validateTask(task);
-      if (errors.length) { failed.push({ index: failed.length + created.length, targetName: b.targetName, errors }); continue; }
-      task.taskNo = nextTaskNo();
-      task.pendingConfirm = (task.source === '对话下单') ? 1 : 0;
-      const r = db.prepare(`INSERT INTO tasks (taskNo,taskName,source,targetName,targetType,geomType,geom,
-          obsType,resolution,spectral,windowStart,windowEnd,maxCloud,maxSlewDeg,timelinessHours,
-          priority,isEmergency,taskPhase,confidence,parseNote,pendingConfirm)
-        VALUES (@taskNo,@taskName,@source,@targetName,@targetType,@geomType,@geom,
-          @obsType,@resolution,@spectral,@windowStart,@windowEnd,@maxCloud,@maxSlewDeg,@timelinessHours,
-          @priority,@isEmergency,@taskPhase,@confidence,@parseNote,@pendingConfirm)`).run(task);
-      created.push({ id: r.lastInsertRowid, taskNo: task.taskNo, targetName: task.targetName, status: '待派单', pendingConfirm: task.pendingConfirm });
+  const ops = [];
+  for (const b of items) {
+    const task = {
+      taskName: b.taskName || '未命名任务',
+      source: b.source ?? '对话下单',
+      targetName: b.targetName,
+      targetType: b.targetType,
+      geomType: b.geomType === 'area' ? 'polygon' : b.geomType,
+      geom: typeof b.geom === 'string' ? b.geom : JSON.stringify(b.geom),
+      obsType: b.obsType,
+      resolution: b.resolution != null ? parseFloat(b.resolution) : null,
+      spectral: b.spectral,
+      windowStart: b.windowStart,
+      windowEnd: b.windowEnd,
+      maxCloud: b.maxCloud != null ? parseFloat(b.maxCloud) : 0.3,
+      maxSlewDeg: b.maxSlewDeg != null ? parseFloat(b.maxSlewDeg) : 45,
+      timelinessHours: b.timelinessHours != null ? parseFloat(b.timelinessHours) : null,
+      priority: b.priority ?? '常规',
+      isEmergency: b.priority === '应急' || b.isEmergency ? 1 : 0,
+      taskPhase: b.taskPhase ?? '未来成像',
+      confidence: b.confidence ? JSON.stringify(b.confidence) : null,
+      parseNote: b.parseNote,
+    };
+    const errors = validateTask(task);
+    if (errors.length) { failed.push({ index: failed.length + created.length, targetName: b.targetName, errors }); continue; }
+    task.taskNo = pbTaskNo(await pbNextSeq("taskNo"));
+    task.pendingConfirm = (task.source === '对话下单') ? 1 : 0;
+    task.status = '待派单';
+    task.createdAt = pbNow();
+    task.oldId = await pbNextOldId();
+    ops.push({ table: "tasks", method: "POST", data: task, oldId: task.oldId });
+  }
+  if (ops.length) {
+    const results = await pbBatch(ops);
+    for (const r of results) {
+      const t = r.op.data;
+      if (r.ok) created.push({ id: t.oldId, taskNo: t.taskNo, targetName: t.targetName, status: '待派单', pendingConfirm: t.pendingConfirm });
+      else failed.push({ index: failed.length + created.length, targetName: t.targetName, errors: [r.data?.message ?? 'PB 创建失败'] });
     }
-  });
-  tx();
+  }
   res.json({ ok: failed.length === 0, requested: items.length, createdCount: created.length, failedCount: failed.length, created, failed });
 });
 
@@ -226,34 +263,53 @@ dispatchApi.get("/latest", (req, res) => {
   res.json({ taskId: row?.id ?? null });
 });
 
-dispatchApi.get("/tasks", (req, res) => {
+dispatchApi.get("/tasks", async (req, res) => {
   const { status, limit = 500 } = req.query;
-  const rows = status
-    ? db.prepare("SELECT * FROM tasks WHERE status=? ORDER BY id DESC LIMIT ?").all(status, +limit)
-    : db.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT ?").all(+limit);
-  res.json(rows);
+  const r = await pbList("tasks", { filter: status ? `status='${status}'` : undefined, sort: "-oldId", limit: +limit });
+  res.json(r.items.map(pbTaskRow));
 });
 
-dispatchApi.get("/tasks/:id", (req, res) => {
-  const t = db.prepare("SELECT * FROM tasks WHERE id=?").get(+req.params.id);
-  if (!t) return res.status(404).json({ error: 'task not found' });
-  t.geom = JSON.parse(t.geom);
-  t.rankings = db.prepare(`
-    SELECT r.*, c.satName, c.company, c.windowStart wStart, c.windowEnd wEnd, c.overpassTime, c.slewDeg, c.availability, c.cloudFc, c.cloudSource, c.orbitGrade, c.stripIdx, c.stripCount, c.minDistKm, c.imgWinStart, c.imgWinEnd, c.sunElDeg
-    FROM rankings r JOIN candidates c ON c.id = r.candidateId
-    WHERE r.taskId=? ORDER BY r.rank LIMIT 30`).all(t.id);
-  t.orders = db.prepare("SELECT * FROM orders WHERE taskId=? ORDER BY id DESC").all(t.id);
-  t.directPlans = db.prepare("SELECT * FROM directPlans WHERE taskId=? ORDER BY id DESC").all(t.id);
+dispatchApi.get("/tasks/:id", async (req, res) => {
+  const ref = await pbResolveTask(req.params.id);
+  if (!ref) return res.status(404).json({ error: 'task not found' });
+  let t;
+  try { t = await pbGet("tasks", ref.rid); }
+  catch (e) { if (e.status === 404) return res.status(404).json({ error: 'task not found' }); throw e; }
+  t.id = ref.oldId ?? ref.rid;
+  t.geom = JSON.parse(t.geom ?? "{}");
+  if (!t.createdAt) t.createdAt = "0000-00-00 00:00:00";
+  // rankings：旧 SQL 为 rankings JOIN candidates（候选字段平铺），PB 侧用 expand=candidate 组装
+  const ranked = await pbList("rankings", { filter: `task='${ref.rid}'`, sort: "rank", limit: 30, expand: "candidate" });
+  t.rankings = ranked.items.map(r => {
+    const c = r.expand?.candidate ?? {};
+    const { expand: _e, collectionId: _c, collectionName: _n, task: _t, ...row } = r;
+    return {
+      ...row, id: r.oldId ?? r.id, taskId: ref.oldId ?? ref.rid, candidateId: c.oldId ?? null,
+      satName: c.satName, company: c.company,
+      wStart: c.windowStart, wEnd: c.windowEnd, overpassTime: c.overpassTime,
+      slewDeg: c.slewDeg, availability: c.availability, cloudFc: c.cloudFc, cloudSource: c.cloudSource,
+      orbitGrade: c.orbitGrade, stripIdx: c.stripIdx, stripCount: c.stripCount, minDistKm: c.minDistKm,
+      imgWinStart: c.imgWinStart, imgWinEnd: c.imgWinEnd, sunElDeg: c.sunElDeg,
+    };
+  });
+  t.rankings.sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+  const ords = await pbAll("orders", { filter: `task='${ref.rid}'`, sort: "-oldId" });
+  t.orders = ords.map(pbRelRow);
+  const plans = await pbAll("directPlans", { filter: `task='${ref.rid}'`, sort: "-oldId" });
+  t.directPlans = plans.map(pbRelRow);
   res.json(t);
 });
 
-dispatchApi.delete("/tasks/:id", (req, res) => {
-  const id = +req.params.id;
-  db.prepare("DELETE FROM tasks WHERE id=?").run(id);
-  db.prepare("DELETE FROM candidates WHERE taskId=?").run(id);
-  db.prepare("DELETE FROM rankings WHERE taskId=?").run(id);
-  db.prepare("DELETE FROM orders WHERE taskId=?").run(id);
-  db.prepare("DELETE FROM directPlans WHERE taskId=?").run(id);
+dispatchApi.delete("/tasks/:id", async (req, res) => {
+  const ref = await pbResolveTask(req.params.id);
+  if (ref) {
+    // 级联清理：candidates / rankings / orders / directPlans 四处关联记录先查后删
+    for (const table of ["candidates", "rankings", "orders", "directPlans"]) {
+      const rel = await pbAll(table, { filter: `task='${ref.rid}'`, fields: "id" });
+      for (const rec of rel) await pbDelete(table, rec.id);
+    }
+    await pbDelete("tasks", ref.rid);
+  }
   res.json({ ok: true });
 });
 
@@ -598,8 +654,9 @@ dispatchApi.post("/orders/:id/status", (req, res) => {
   res.json({ ok: true, status });
 });
 
-dispatchApi.get("/orders", (req, res) => {
-  res.json(db.prepare("SELECT * FROM orders ORDER BY id DESC LIMIT 200").all());
+dispatchApi.get("/orders", async (req, res) => {
+  const r = await pbList("orders", { sort: "-oldId", limit: 200, expand: "task" });
+  res.json(r.items.map(pbRelRow));
 });
 
 // 卫星类型智能推荐（用户未指定 obsType 时，AI 先调用此接口分析，再请用户确认）
@@ -652,14 +709,17 @@ dispatchApi.post("/_sql", (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-dispatchApi.get("/companies", (req, res) => {
-  res.json(db.prepare("SELECT * FROM companies ORDER BY id").all());
+dispatchApi.get("/companies", async (req, res) => {
+  const r = await pbList("companies", { sort: "oldId", limit: 500 });
+  res.json(r.items.map(c => ({ ...c, id: c.oldId ?? c.id })));
 });
 
-dispatchApi.get("/pool", (req, res) => {
-  res.json(db.prepare(`
-    SELECT p.*, t.taskName, t.targetName, t.obsType, t.resolution FROM taskPool p
-    JOIN tasks t ON t.id=p.taskId WHERE p.claimedBy IS NULL ORDER BY p.id DESC`).all());
+dispatchApi.get("/pool", async (req, res) => {
+  const r = await pbList("taskPool", { filter: "claimedBy=''", sort: "-oldId", limit: 500, expand: "task" });
+  res.json(r.items.map(p => {
+    const t = p.expand?.task ?? {};
+    return { ...pbRelRow(p), taskName: t.taskName, targetName: t.targetName, obsType: t.obsType, resolution: t.resolution };
+  }));
 });
 
 // ─── 应急直控（4.6）──────────────────────────────────────────────────────
@@ -948,8 +1008,12 @@ dispatchApi.post("/plans/:id/complete", (req, res) => {
   res.json({ ok: true });
 });
 
-dispatchApi.get("/plans", (req, res) => {
-  res.json(db.prepare("SELECT p.*, t.taskName, t.targetName FROM directPlans p LEFT JOIN tasks t ON t.id=p.taskId ORDER BY p.id DESC LIMIT 100").all());
+dispatchApi.get("/plans", async (req, res) => {
+  const r = await pbList("directPlans", { sort: "-oldId", limit: 100, expand: "task" });
+  res.json(r.items.map(p => {
+    const t = p.expand?.task ?? {};
+    return { ...pbRelRow(p), taskName: t.taskName, targetName: t.targetName, createdAt: p.createdAt || "0000-00-00 00:00:00" };
+  }));
 });
 dispatchApi.get("/plans/:id", (req, res) => {
   const p = db.prepare("SELECT * FROM directPlans WHERE id=?").get(+req.params.id);
