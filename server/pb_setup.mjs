@@ -139,7 +139,7 @@ async function ensureCountersCollection() {
   console.log("[pb_setup] [counters] collection 创建");
 }
 
-export async function runSetup() {
+export async function runSetup(opts = {}) {
   const t0 = Date.now();
   await waitPbHealthy();
   await ensureCountersCollection().catch(e => console.error("[pb_setup] counters 自举失败:", e.message));
@@ -177,7 +177,10 @@ export async function runSetup() {
   } else {
     console.log("[pb_setup] 已迁移过（migration_done=1），跳过数据灌入");
   }
-  // relation 字段自愈：首启降级为 number 的 relation 字段 PATCH 回 relation
+  // relation 字段自愈：仅显式触发时执行（启动路径 skipRelHeal=true 跳过，防 PATCH 失败影响启动）
+  if (opts.skipRelHeal) {
+    console.log("[pb_setup] 跳过 relation 自愈（skipRelHeal）");
+  } else {
   await auth();
   const cols2 = await api("/api/collections");
   const arr2 = cols2.items || cols2;
@@ -210,6 +213,7 @@ export async function runSetup() {
     if (r.id) { fixedRel++; console.log(`[pb_setup] [${spec.table}.${spec.field}] ${f.type} → relation 自愈`); }
   }
   if (fixedRel) console.log(`[pb_setup] relation 自愈 ${fixedRel} 个字段`);
+  } // end skipRelHeal else
   console.log(`[pb_setup] 完成 (${((Date.now()-t0)/1000).toFixed(1)}s): ${summary.join(' ')}`);
   return { ok: allOk, summary };
 }
