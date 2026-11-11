@@ -44,21 +44,35 @@ export function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 // ─── 轨道预报（SGP4，gpJson 优先）────────────────────────────────────────
+const _satrecCache = new Map();
 function makeSatrec(sat) {
+  const hit = _satrecCache.get(sat.noradId);
+  if (hit !== undefined) return hit;
+  let rec = null;
   if (sat.gpJson) {
     try {
       const gp = typeof sat.gpJson === 'string' ? JSON.parse(sat.gpJson) : sat.gpJson;
-      const rec = satellite.json2satrec(gp);
-      if (rec && rec.error === 0) return rec;
+      rec = satellite.json2satrec(gp);
+      if (rec && rec.error === 0) rec = rec; else rec = null;
     } catch {}
   }
-  try { return satellite.twoline2satrec(sat.tle1.trim(), sat.tle2.trim()); } catch { return null; }
+  if (!rec) { try { rec = satellite.twoline2satrec(sat.tle1.trim(), sat.tle2.trim()); } catch { rec = null; } }
+  if (_satrecCache.size > 512) _satrecCache.clear();
+  _satrecCache.set(sat.noradId, rec);
+  return rec;
 }
 
 // 卫星星下点轨迹采样：t0 起 minutesAhead 分钟内 stepSec 步长
+// SGP4 是纯函数，track 只依赖 (sat, t0, aheadMin, step)，与条带无关——模块级缓存消除
+// 长窗分段/多条带场景下同一星的重复 SGP4 计算
+const _trackCache = new Map();
+const _TRACK_CACHE_MAX = 64;
 export function sampleTrack(sat, t0, minutesAhead, stepSec = 30) {
   const satrec = makeSatrec(sat);
   if (!satrec) return [];
+  const key = `${sat.noradId}|${Math.floor(t0.getTime() / 60000)}|${minutesAhead}|${stepSec}`;
+  const hit = _trackCache.get(key);
+  if (hit) return hit;
   const pts = [];
   for (let t = 0; t <= minutesAhead * 60; t += stepSec) {
     const date = new Date(t0.getTime() + t * 1000);
@@ -72,6 +86,10 @@ export function sampleTrack(sat, t0, minutesAhead, stepSec = 30) {
       if (!isNaN(lat) && !isNaN(lon)) pts.push({ t: date.getTime(), lat, lon, altKm: geo.height });
     } catch {}
   }
+  if (_trackCache.size >= _TRACK_CACHE_MAX) {
+    _trackCache.delete(_trackCache.keys().next().value); // FIFO 淘汰
+  }
+  _trackCache.set(key, pts);
   return pts;
 }
 
@@ -97,7 +115,35 @@ export function computeVisibleWindows(sat, strip, opts) {
   const { windowStart, windowEnd, minElevSunDeg = 10, maxSlewDeg = 45 } = opts;
   const t0 = new Date(windowStart);
   const tEnd = new Date(windowEnd).getTime();
-  const aheadMin = Math.min(4320, Math.ceil((tEnd - t0.getTime()) / 60000) + 60); // 最多3天+1h缓冲
+  // 长窗分段：原实现 aheadMin 封顶 3 天——时间窗拉长后只采样前 3 天，后面的解全部漏掉
+  // （大区域任务“拉长时间窗也没有解”的根因）。改为：≤3天窗一次采样（原逻辑）；
+  // >3天窗切成多段（每段≤3天），每段独立跑同一套粗扫+精化，合并去重。
+  const spanMs = tEnd - t0.getTime();
+  const SEG_MS = 3 * 86400000;
+  // GEO 凝视星判定：24h 星下点经度漂移 <2°（悬停）。GEO 对固定点每天同一时刻同一几何，
+  // 分段采样毫无意义且慢（实测 GAOFEN-4 15天窗 11 条带 34s）——整窗一段，粗扫截断
+  const probe = sampleTrack(sat, t0, 1440, 300);
+  const isGeoSat = probe.length > 2 && Math.abs(probe[probe.length-1].lon - probe[0].lon) < 0.035; // 弧度≈2°
+  if (spanMs > SEG_MS && !isGeoSat) {
+    const merged = [];
+    let segStart = t0.getTime();
+    while (segStart < tEnd) {
+      const segEnd = Math.min(segStart + SEG_MS, tEnd);
+      for (const w of computeVisibleWindows(sat, strip, { ...opts, windowStart: new Date(segStart).toISOString(), windowEnd: new Date(segEnd).toISOString() })) {
+        merged.push(w);
+      }
+      segStart = segEnd;
+    }
+    // 按过顶时刻排序去重（段边界可能重复同一过顶），每星上限 12 窗
+    merged.sort((a, b) => a.overpass - b.overpass);
+    const dedup = [];
+    for (const w of merged) {
+      if (dedup.length && w.overpass - dedup[dedup.length - 1].overpass < 120000) continue; // 2分钟内视为同窗
+      dedup.push(w);
+    }
+    return dedup.slice(0, 12);
+  }
+  const aheadMin = Math.ceil(spanMs / 60000) + 60; // 单段最多 3 天+1h缓冲
   const track = sampleTrack(sat, t0, aheadMin, 20);
   if (track.length === 0) return [];
 
@@ -128,8 +174,10 @@ export function computeVisibleWindows(sat, strip, opts) {
   if (inWin && best) {
     windows.push({ start: winStart, end: Math.min(track[track.length-1].t, tEnd), overpass: best.t, minDistKm: best.dKm, slewDeg: best.slewDeg });
   }
-  // 只保留与任务窗有交且过顶在任务窗内的
-  const coarse = windows.filter(w => w.overpass >= t0.getTime() && w.overpass <= tEnd).slice(0, 8);
+  // 只保留与任务窗有交且过顶在任务窗内的；GEO 凝视星（悬停型）对固定点只有"持续可见区"
+  // ，粗扫会切出大量碎窗——每段只留前 2 个，避免精化爆炸（实测 GAOFEN-4 单星 34s）
+  const isGeo = Math.abs(track[0].period ? track[0].period - 1440 : 0) < 60 || sat.category === 'staring' || sat.subCategory === 'staring';
+  const coarse = windows.filter(w => w.overpass >= t0.getTime() && w.overpass <= tEnd).slice(0, isGeo ? 2 : 8);
 
   // ─── 秒级精化：20s 粗采样对直控指令不够（端点误差可达数百公里）───
   // 对每个粗窗，在 [winStart-20s, winEnd+20s] 内以 1s 步长重采样，
@@ -138,15 +186,17 @@ export function computeVisibleWindows(sat, strip, opts) {
     const rStart = w.start - 30000;
     const rEnd = Math.min(w.end + 30000, tEnd);
     let tcaT = null, tcaD = Infinity;
-    for (let t = rStart; t <= rEnd; t += 1000) {
-      const p = sampleTrack(sat, new Date(t), 0.02, 1)[0];
-      if (!p) continue;
+    // 一次取整段 1s 步长轨道（缓存命中后条带间/段间复用），原先逐点调用
+    // sampleTrack(sat, new Date(t), 0.02, 1) 每点都 makeSatrec+propagate，慢 10 倍以上
+    const fineTrack = sampleTrack(sat, new Date(rStart), Math.ceil((rEnd - rStart) / 60000) + 1, 1)
+      .filter(p => p.t >= rStart && p.t <= rEnd);
+    for (const p of fineTrack) {
       const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
-      if (dKm < tcaD) { tcaD = dKm; tcaT = t; }
+      if (dKm < tcaD) { tcaD = dKm; tcaT = p.t; }
     }
     if (tcaT === null) return w;
     // TCA 前后按可见判据回扫精确窗口边界（1s 步长）
-    const fine = sampleTrack(sat, new Date(Math.max(t0.getTime(), tcaT - 300000)), Math.min(10, (tEnd - tcaT) / 60000 + 10), 1)
+    const fine = fineTrack
       .filter(p => p.t >= Math.max(t0.getTime(), tcaT - 300000) && p.t <= tEnd + 30000);
     let fStart = tcaT, fEnd = tcaT;
     for (const p of fine) {
@@ -171,25 +221,15 @@ export function computeVisibleWindows(sat, strip, opts) {
         imgWinEnd = p.t;
       }
     }
-    // 采样精化（2026-11-11）：20s 步进对幅宽穿越窗（仅 1.6s 级）漏检率高——
-    // 在粗扫 imgWin 或 TCA ±60s 做 1s 细扫，重定覆盖窗边界
+    // 采样精化：幅宽穿越窗仅 1.6s 级，直接在已取出的 1s 轨（fineTrack）上重定边界，
+    // 不再单独 propagate（原先每窗 240 次 propagate + makeSatrec）
     {
-      const tcaRef = imgWinStart ?? tcaT;
-      const fineStart = new Date(tcaRef - 60000).getTime();
-      const fineEnd = new Date(tcaRef + 60000).getTime();
-      const satrec = makeSatrec(sat);
       let s = null, e = null;
-      for (let t = fineStart; t <= fineEnd; t += 500) {
-        const d = new Date(t);
-        try {
-          const pv = satellite.propagate(satrec, d);
-          if (!pv?.position || typeof pv.position === 'boolean') continue;
-          const geo = satellite.eciToGeodetic(pv.position, satellite.gstime(d));
-          const dKm = haversineKm(satellite.degreesLat(geo.latitude), satellite.degreesLong(geo.longitude), strip.lat, strip.lon);
-          if (dKm <= footprintHalfKm) { if (s === null) s = d; e = d; }
-        } catch { /* skip */ }
+      for (const p of fineTrack) {
+        const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
+        if (dKm <= footprintHalfKm) { if (s === null) s = p.t; e = p.t; }
       }
-      if (s) { imgWinStart = s.toISOString(); imgWinEnd = e.toISOString(); }
+      if (s !== null) { imgWinStart = new Date(s).toISOString(); imgWinEnd = new Date(e).toISOString(); }
     }
     return {
       start: fStart, end: fEnd,          // 姿态可及窗（可见弧段）

@@ -284,9 +284,10 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
 
   // ── 初始规划诊断（4.3.1）：所有候选都拍不到时，在建单/派单前就告诉用户「规划有问题」──
   // 问题不在解算环节，而在上游：时窗/分辨率/目标口径定错了。这里归因并给可执行修正建议
+  // 诊断查全任务所有条带（SENTINEL 这类幅宽可覆盖但被分辨率筛掉的候选可能在任意条带）
   const diagRows = db.prepare(`
     SELECT c.satName, c.company, c.minDistKm, c.imgWinStart, c.imgWinEnd, c.validRes, c.slewDeg, c.filtered, c.filterReason
-    FROM candidates c WHERE c.taskId=? AND c.stripIdx=(SELECT MIN(stripIdx) FROM candidates WHERE taskId=?)`).all(task.id, task.id);
+    FROM candidates c WHERE c.taskId=?`).all(task.id);
   const passingRows = diagRows.filter(r => r.filtered === 0);
   const coverableRows = passingRows.filter(r => r.imgWinStart && r.imgWinEnd);
   let planningDiagnosis = null;
