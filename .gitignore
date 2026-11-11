@@ -6,3 +6,4 @@ dist
 client/dist
 data/gp_raw.json
 data/*.log
+__pycache__/
