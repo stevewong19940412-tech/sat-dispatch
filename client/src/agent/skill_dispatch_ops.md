@@ -36,6 +36,18 @@ python3 "$CLI" <子命令>   # 或先 cp "$CLI" /usr/local/bin/dispatch && chmod
 - **窄窗 candidates=0 且 gapStats 空 ≠ 系统故障**：先用宽窗诊断任务（maxCloud=1、≥3 天窗）验证链路（candidates>0 且 gapStats 有筛除条目 = 链路正常），再筛真实窗口。
 - **"某地全境"口径**：先问用户——全市域 polygon / 主城区 / 中心点。全岛/全市 polygon 系统自动拆条带（直径/12km 幅宽），**优先用 polygon 单任务而不是手工拆 N 个点任务**（任务数少、条带连续、跟踪简单）。
 
+## 批量建单（格网测绘类，工程侧刚性入口）
+
+**AI 文本输出不算数**——「生成了 120 个任务」只有 `dispatch batch-create` 返回的 created 数组才是事实。标准动作：
+
+```bash
+dispatch batch-create '@任务数组.json' 1   # 末参1=自动确认下发（AI建单两步走自动完成）
+```
+
+- 服务端单事务原子落库（≤500条/次，更多分批）；逐条返回 成功(taskId/taskNo)/失败(errors)
+- 回执只看三个数：requested / createdCount / failedCount；失败的直接列 errors，无解/坏数据如实报，不写长篇解释
+- 建完必须回读断言：`dispatch tasks` 抽查计数与 createdCount 一致
+
 ## AI 建单两步走
 
 AI/对话创建的任务 `pendingConfirm=1`：先 `POST /api/dispatch/tasks/<id>/confirm` 确认，再 `dispatch dispatch <id>`。顺序反了报 400"任务待人工确认下发"。CLI 吞错误体时用 `curl -H "Authorization: Bearer $BLADE_API_TOKEN"` 打同 URL 看 error 详情。
