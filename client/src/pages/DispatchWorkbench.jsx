@@ -396,7 +396,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 }
 
 // ─── 任务管理 Tab ─────────────────────────────────────────────────────────
-function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode, setMsg, setTab, load }) {
+function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, advanceOrder, deleteTask, onRequestDelete, setAssignMode, setMsg, setTab, load, planAction }) {
   return (
     <div style={{ display: 'flex', gap: 14 }}>
       {/* 任务列表 */}
@@ -648,17 +648,27 @@ function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
             </div>
           )}
           {/* 校验结果 */}
-          {p.validation && (
-            <div style={{ fontSize: 11.5, marginBottom: 8, color: p.validation.pass ? 'var(--accent)' : 'var(--danger)' }}>
-              独立校验：{p.validation.pass ? `✅ 通过（总时长 ${p.validation.totalDuration}s，开关机/间隔/固存/参数 全部合规）` : `❌ ${p.validation.errors.join('；')}`}
+          {(() => {
+            const v = typeof p.validation === 'string' ? (() => { try { return JSON.parse(p.validation); } catch { return null; } })() : p.validation;
+            if (!v || !v.errors) return null;
+            return (
+            <div style={{ fontSize: 11.5, marginBottom: 8, color: v.pass ? 'var(--accent)' : 'var(--danger)' }}>
+              独立校验：{v.pass ? `✅ 通过（总时长 ${v.totalDuration}s，开关机/间隔/固存/参数 全部合规）` : `❌ ${(v.errors ?? []).join('；') || '校验未通过（无明细）'}`}
             </div>
-          )}
+            );
+          })()}
           {/* 弧段 */}
-          {p.arcInfo && (
-            <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 8 }}>
-              测控弧段：{JSON.parse(p.arcInfo).station} {JSON.parse(p.arcInfo).arcStart.slice(11, 16)} ~ {JSON.parse(p.arcInfo).arcEnd.slice(11, 16)} UTC
-            </div>
-          )}
+          {(() => {
+            if (!p.arcInfo) return null;
+            try {
+              const a = typeof p.arcInfo === 'string' ? JSON.parse(p.arcInfo) : p.arcInfo;
+              return (
+              <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 8 }}>
+                测控弧段：{a.station} {a.arcStart?.slice(11, 16)} ~ {a.arcEnd?.slice(11, 16)} UTC
+              </div>
+              );
+            } catch { return null; }
+          })()}
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'generate')}>
               {busy ? '⏳ 解算中（约10~30秒）…' : p.status === '待确认' ? '① 计算直控参数包' : '重算参数包'}
