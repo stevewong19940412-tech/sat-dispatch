@@ -5,7 +5,7 @@
 """
 import json, os, sqlite3, sys, urllib.request
 
-CLI_VERSION = 5  # v5: 新增 preflight 下单前预检（固化 geom/云量双源/光照/长窗口径）（v4=补齐 sats/companies+--help别名 v3=自动地址探测+weather/recommend/delete v1=写死地址 v2=基础命令）
+CLI_VERSION = 6  # v6: 新增 batch-create 批量建单刚性入口（单事务原子落库+逐条成败+可选确认下发）（v4=补齐 sats/companies+--help别名 v3=自动地址探测+weather/recommend/delete v1=写死地址 v2=基础命令）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -135,6 +135,7 @@ def main():
         'weather <lat> <lon> [天数=3]': "查目标点逐小时云量+最佳成像窗口建议（open-meteo真实预报，72h内）",
         "recommend '<JSON>'": "卫星类型智能推荐（用户未指定光学/SAR时调用），返回推荐类型+理由，交用户确认后再 create",
                 "preflight '<JSON>'": "下单前预检（秒级，不写库）：时窗跨度/光照可行性/云量源边界/geom格式——批量或长窗下单前先跑它",
+                "batch-create '<JSON数组或@文件>' [确认=0|1]": "批量建单（工程侧刚性入口）：单事务原子落库，返回逐条成功(taskId/taskNo)/失败(errors)——只有这里的 created 才算数，AI 文本输出不算",
             },
             "hint": "dispatch --help 与 dispatch help 等效；子命令必须小写精确匹配",
         })
@@ -217,6 +218,42 @@ def main():
         elif r.get("reused"):
             print(f"\n↩ 同目标任务已存在：{r['taskNo']}（状态 {r['status']}），未重复建单。")
         sys.exit(0)
+    elif cmd == "batch-create" and arg:
+        # 批量建单（工程侧刚性入口）：接任务 JSON 数组文件或内联 JSON，单事务原子落库。
+        # 「AI 说生成了 N 个任务」不算数——本命令的 created 数组才是事实。
+        # 用法: dispatch batch-create '<JSON数组或@文件路径>' [确认下发=0|1]
+        import json as _json
+        raw = arg
+        if raw.startswith("@"):
+            try:
+                with open(raw[1:], encoding="utf-8") as f:
+                    raw = f.read()
+            except Exception as e:
+                die(f"读文件失败: {e}")
+        try:
+            arr = _json.loads(raw)
+        except Exception as e:
+            die(f"参数必须是任务 JSON 数组: {e}")
+        if isinstance(arr, dict): arr = [arr]
+        if not isinstance(arr, list) or not arr:
+            die("须为非空任务数组")
+        confirm = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
+        r = api_req("/tasks/batch", method="POST", body={"tasks": arr})
+        # 刚性回写：全部成功时按需逐个确认（pendingConfirm→已确认待派发）
+        confirmed = 0
+        if confirm and r.get("created"):
+            for c in r["created"]:
+                if c.get("pendingConfirm"):
+                    try:
+                        api_req(f"/tasks/{c['id']}/confirm", method="POST", body={})
+                        c["status"] = "已确认待派发"
+                        confirmed += 1
+                    except Exception as e:
+                        c["confirmError"] = str(e)
+        out({"ok": r.get("ok"), "requested": r.get("requested"), "createdCount": r.get("createdCount"),
+             "failedCount": r.get("failedCount"), "confirmedCount": confirmed if confirm else None,
+             "created": r.get("created"), "failed": r.get("failed")})
+
     elif cmd == "dispatch":
         die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
             "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")

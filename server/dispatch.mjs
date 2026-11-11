@@ -166,10 +166,58 @@ dispatchApi.post("/tasks", (req, res) => {
   res.json({ ...task, id: r.lastInsertRowid, status: '待派单' });
 });
 
+// 批量建单（工程侧刚性入口）：格网测绘类任务一次 N 条，单事务原子落库。
+// 解决「AI 说生成了 N 个任务但列表里一个都没有」——AI 文本输出不算数，
+// 只有本接口返回的 created 数组才是事实。逐条返回 成功(taskId/taskNo)/失败(errors)
+dispatchApi.post("/tasks/batch", (req, res) => {
+  const items = Array.isArray(req.body?.tasks) ? req.body.tasks : null;
+  if (!items || items.length === 0) return res.status(400).json({ error: 'body 须为 {tasks:[...]}，至少 1 条' });
+  if (items.length > 500) return res.status(400).json({ error: `单次上限 500 条（收到 ${items.length}），分批调用` });
+  const created = [], failed = [];
+  const tx = db.transaction(() => {
+    for (const b of items) {
+      const task = {
+        taskName: b.taskName || '未命名任务',
+        source: b.source ?? '对话下单',
+        targetName: b.targetName,
+        targetType: b.targetType,
+        geomType: b.geomType === 'area' ? 'polygon' : b.geomType,
+        geom: typeof b.geom === 'string' ? b.geom : JSON.stringify(b.geom),
+        obsType: b.obsType,
+        resolution: b.resolution != null ? parseFloat(b.resolution) : null,
+        spectral: b.spectral,
+        windowStart: b.windowStart,
+        windowEnd: b.windowEnd,
+        maxCloud: b.maxCloud != null ? parseFloat(b.maxCloud) : 0.3,
+        maxSlewDeg: b.maxSlewDeg != null ? parseFloat(b.maxSlewDeg) : 45,
+        timelinessHours: b.timelinessHours != null ? parseFloat(b.timelinessHours) : null,
+        priority: b.priority ?? '常规',
+        isEmergency: b.priority === '应急' || b.isEmergency ? 1 : 0,
+        taskPhase: b.taskPhase ?? '未来成像',
+        confidence: b.confidence ? JSON.stringify(b.confidence) : null,
+        parseNote: b.parseNote,
+      };
+      const errors = validateTask(task);
+      if (errors.length) { failed.push({ index: failed.length + created.length, targetName: b.targetName, errors }); continue; }
+      task.taskNo = nextTaskNo();
+      task.pendingConfirm = (task.source === '对话下单') ? 1 : 0;
+      const r = db.prepare(`INSERT INTO tasks (taskNo,taskName,source,targetName,targetType,geomType,geom,
+          obsType,resolution,spectral,windowStart,windowEnd,maxCloud,maxSlewDeg,timelinessHours,
+          priority,isEmergency,taskPhase,confidence,parseNote,pendingConfirm)
+        VALUES (@taskNo,@taskName,@source,@targetName,@targetType,@geomType,@geom,
+          @obsType,@resolution,@spectral,@windowStart,@windowEnd,@maxCloud,@maxSlewDeg,@timelinessHours,
+          @priority,@isEmergency,@taskPhase,@confidence,@parseNote,@pendingConfirm)`).run(task);
+      created.push({ id: r.lastInsertRowid, taskNo: task.taskNo, targetName: task.targetName, status: '待派单', pendingConfirm: task.pendingConfirm });
+    }
+  });
+  tx();
+  res.json({ ok: failed.length === 0, requested: items.length, createdCount: created.length, failedCount: failed.length, created, failed });
+});
+
 // AI 建单联动：最近 3 分钟内由 AI 创建的任务（供工作台自动打开）
 // CLI 版本对账（旧副本自愈：CLI 启动时对比，旧则提示 --self-update）
 dispatchApi.get("/cli-version", (req, res) => {
-  res.json({ version: 5 });
+  res.json({ version: 6 });
 });
 
 dispatchApi.get("/latest", (req, res) => {
