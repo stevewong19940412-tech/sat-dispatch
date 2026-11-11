@@ -5,7 +5,7 @@
 """
 import json, os, sqlite3, sys, urllib.request
 
-CLI_VERSION = 3  # v3: 自动地址探测+weather/recommend/delete（v1=写死地址 v2=基础命令）
+CLI_VERSION = 4  # v4: 补齐 sats/companies 实现+--help/-h 别名（v3=自动地址探测+weather/recommend/delete v1=写死地址 v2=基础命令）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -112,6 +112,8 @@ def main():
         cmd = "help"
     else:
         cmd = sys.argv[1]
+    if cmd in ("--help", "-h", "-?"):
+        cmd = "help"
     arg = sys.argv[2] if len(sys.argv) > 2 else None
 
     if cmd == "help":
@@ -121,11 +123,12 @@ def main():
             "commands": {
                 "tasks": "列出最近任务",
                 "task <id>": "任务详情（排序清单/订单/直控方案）",
+                "pool": "查看任务池（挂起待认领的任务）",
                 "create '<JSON>'": "创建任务单。字段: taskName,targetName,lat,lon,obsType(optical/sar),resolution(米),windowStart,windowEnd(ISO),maxCloud(0-1),timelinessHours,priority(常规/重点/应急)。必填缺失时返回 needClarify",
                 "candidates <taskId>": "候选卫星计算（可见窗/约束/云量/排序，耗时较长）",
                 "order-intake <json>": "一站式下单（推荐）：传任务JSON，服务端原子完成建单+确认+候选+回读断言",
         "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
-                "sats [关键词]": "查卫星资源",
+                "sats [关键词]": "查卫星资源（按名称/类别/国家/运营商模糊匹配，如 sats 高分）",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
         "delete <taskId>": "删除任务单（仅待派单/挂任务池状态；级联清理候选排序订单）",
@@ -133,7 +136,19 @@ def main():
         "recommend '<JSON>'": "卫星类型智能推荐（用户未指定光学/SAR时调用），返回推荐类型+理由，交用户确认后再 create",
                 "plans": "直控方案列表",
             },
+            "hint": "dispatch --help 与 dispatch help 等效；子命令必须小写精确匹配",
         })
+
+    elif cmd == "sats":
+        kw = f"%{arg}%" if arg else "%"
+        rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                     resolution, altitude, inclination, period, decayed
+                     FROM satellites WHERE (name LIKE ? OR country LIKE ? OR operator LIKE ?
+                     OR category LIKE ? OR payloadType LIKE ?) AND decayed=0
+                     ORDER BY noradId LIMIT 50""",
+                 (kw, kw, kw, kw, kw))
+        out({"总数": len(rows), "卫星": rows if arg else rows[:20],
+             "提示": "传关键词缩小范围，如 dispatch sats 高分 / sats sar"})
 
     elif cmd == "tasks":
         out(q("SELECT id, taskNo, taskName, targetName, obsType, resolution, priority, status, windowStart, windowEnd FROM tasks ORDER BY id DESC LIMIT 30"))
@@ -243,6 +258,12 @@ def main():
         with urllib.request.urlopen(req, timeout=30) as r:
             res = json.loads(r.read().decode())
         out({"ok": True, "deleted": t.get("taskNo"), "级联清理": "candidates/rankings/orders/directPlans"})
+
+    elif cmd == "companies":
+        out(api_req("/companies"))
+
+    elif cmd == "pool":
+        out(api_req("/pool"))
 
     elif cmd == "orders":
         out(q("SELECT orderNo, taskId, channel, company, satName, status, price, fulfillment FROM orders ORDER BY id DESC LIMIT 30"))
