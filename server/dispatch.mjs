@@ -317,6 +317,23 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
   res.json(t);
 });
 
+// 数据重置（工程侧管理端点）：清空全部业务流水（订单/方案/候选/排序/池/日志/履约），保留卫星/公司基础表
+// 数据重置（工程侧管理端点）：清空全部业务流水（订单/方案/候选/排序/池/日志/履约），保留卫星/公司基础表
+dispatchApi.post("/_cleanup", async (req, res) => {
+  if (req.headers['x-operator'] !== 'human') return res.status(403).json({ error: '仅工作台人工通道可用' });
+  const cleared = {};
+  for (const table of ["rankings", "candidates", "orders", "directPlans", "taskPool", "dispatchLog", "fulfillmentLog", "tasks"]) {
+    try {
+      const all = await pbAll(table, { fields: "id" });
+      for (const rec of all) await pbDelete(table, rec.id);
+      cleared[table] = all.length;
+    } catch (e) {
+      cleared[table] = "err: " + e.message.slice(0, 80);
+    }
+  }
+  res.json({ ok: true, cleared });
+});
+
 dispatchApi.delete("/tasks/:id", async (req, res) => {
   const ref = await pbResolveTask(req.params.id);
   if (ref) {
