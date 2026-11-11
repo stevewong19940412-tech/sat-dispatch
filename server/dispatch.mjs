@@ -4,7 +4,7 @@ import { db } from "./db.mjs";
 import { nextTaskNo, nextOrderNo } from "./dispatch_schema.mjs";
 import {
   normalizeTaskStrips, computeVisibleWindows, forecastCloud, cloudEffective,
-  applyConstraints, getCapability, haversineKm,
+  applyConstraints, getCapability, haversineKm, DEFAULT_CAPS,
 } from "./candidate_calc.mjs";
 import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
@@ -338,9 +338,9 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
     // R1 应急 → 创建直控执行方案（待值班确认）
     // top 候选优选"幅宽可覆盖"（imgWin 非空）的，排序分相同前提下拍到 > 拍不到
     const top = ranking.find(r => r.imgWinStart && r.imgWinEnd) ?? ranking[0];
-    const r = db.prepare(`INSERT INTO directPlans (taskId,satNoradId,satName,company,windowStart,windowEnd,overpassTime,imgWinStart,imgWinEnd,status)
-      VALUES (?,?,?,?,?,?,?,?,?, '待确认')`).run(task.id, top.satNoradId, top.satName, top.company,
-      top.windowStart, top.windowEnd, top.overpassTime, top.imgWinStart, top.imgWinEnd);
+    const r = db.prepare(`INSERT INTO directPlans (taskId,satNoradId,satName,company,windowStart,windowEnd,overpassTime,imgWinStart,imgWinEnd,minDistKm,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?, '待确认')`).run(task.id, top.satNoradId, top.satName, top.company,
+      top.windowStart, top.windowEnd, top.overpassTime, top.imgWinStart, top.imgWinEnd, top.minDistKm ?? null);
     db.prepare("UPDATE tasks SET status='直控执行中' WHERE id=?").run(task.id);
     return res.json({ channel, rule, planId: r.lastInsertRowid, topRank: top });
   }
@@ -576,7 +576,8 @@ export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
   const spec = getPayloadSpec(plan.satName);
   const omegaMax = spec?.slewRate ?? 1.0;             // °/s 型号真实值
   const alphaMax = 0.5;                                // °/s² 典型
-  const slewTime = Math.abs(slew) / omegaMax + omegaMax / alphaMax; // 机动时长公式
+  // 凝视型载荷（GEO 如 GAOFEN-4，slewRate=0）：指向靠扫描机构/电子稳像，无姿态机动，机动时长为 0
+  const slewTime = omegaMax > 0 ? Math.abs(slew) / omegaMax + omegaMax / alphaMax : 0;
   const stabilize = 10.0;  // 稳定 s（调研典型5~20s取中值）
   const warmup = 300.0;    // 相机开机预热 s（光学调研典型2~10min，取5min量级；星上常开制冷按光路准备计）
   // 成像时长：以「成像覆盖窗」（幅宽半宽内能拍到目标的秒级区间）为准，
@@ -628,6 +629,8 @@ function round1(x) { return Math.round(x * 10) / 10; }
 function satellite2json() { return null; }
 
 // 独立校验器（与生成引擎分开实现的判定）
+// errors 元素可为字符串或 { code, msg, detail } 结构化对象：detail 携带几何/参数数值，
+// 前端据此展开「为什么驳回」的诊断明细，不再只是单句结论
 export function validateCommands(commands, sat, plan) {
   const errors = [];
   const switchOn = commands.filter(c => c.action === '开机预热').length;
@@ -651,7 +654,35 @@ export function validateCommands(commands, sat, plan) {
     const imgStart = seqStart + imgCmd.startOffset * 1000;
     const imgCenter = imgStart + imgCmd.duration * 1000 / 2;
     if (!plan.imgWinStart || !plan.imgWinEnd) {
-      errors.push('幅宽不覆盖：整个过境弧段内传感器幅宽均罩不住目标，此方案不能成像，请改派其他过顶更近的卫星');
+      // 结构化驳回：给出「差多少才够拍」的数值诊断（幅宽/最近距离/侧摆/需要的高度）
+      // 数据源：candidates 落库的 minDistKm（精确 TCA 距离）+ DEFAULT_CAPS 型号幅宽
+      const caps = getCapability(sat);
+      const halfKm = caps.swathKm / 2;
+      const minKm = plan.minDistKm ?? null;
+      const altKm = sat.altitude && sat.altitude < 20000 ? sat.altitude : null;
+      const overKm = minKm != null ? Math.round((minKm - halfKm) * 10) / 10 : null;
+      errors.push({
+        code: 'SWATH_NO_COVER',
+        msg: '幅宽不覆盖：整个过境弧段内传感器幅宽均罩不住目标，此方案不能成像，请改派其他过顶更近的卫星',
+        detail: {
+          satName: plan.satName,
+          swathKm: caps.swathKm,
+          halfKm,
+          minDistKm: minKm,                     // 过境弧段内星-目标最近距离
+          overByKm: overKm,                     // 最近距离超出幅宽半宽多少 km（差多少才够拍）
+          slewDeg: plan.slewDeg ?? null,
+          // 要罩住目标所需的等效轨道高度（把最近距离压进半宽内）：alt ≈ dist×cos(slew)…
+          // 简化口径：距离 minKm 在侧摆 slewDeg 下对应的必需高度，供运维判断该星是否天生拍不到
+          requiredAltKm: minKm != null && altKm != null
+            ? Math.round(minKm * Math.cos(Math.atan(minKm / altKm)) * 10) / 10
+            : null,
+          actualAltKm: altKm,
+          conclusion: minKm != null
+            ? `最近过顶距目标 ${Math.round(minKm * 10) / 10}km，而 ${plan.satName} 幅宽半宽仅 ${halfKm}km（幅宽 ${caps.swathKm}km）——超出 ${overKm}km，整段过境均无法把目标压进幅宽内`
+            : `${plan.satName} 幅宽半宽 ${halfKm}km，过境弧段内未有任何时刻能覆盖目标`,
+          advice: '点击「换一颗候选卫星解算」切到过顶更近的候选，或改用幅宽更大的型号（如宽幅星）',
+        },
+      });
     }
     const winS = plan.imgWinStart ? new Date(plan.imgWinStart).getTime() - 3000 : tca - imgCmd.duration * 500;
     const winE = plan.imgWinEnd ? new Date(plan.imgWinEnd).getTime() + 3000 : tca + imgCmd.duration * 500;
@@ -721,6 +752,51 @@ dispatchApi.post("/plans/:id/generate", (req, res) => {
   res.json({ commands, validation, timeline, paramPack });
 });
 
+// 换一颗候选卫星重新解算（校验驳回后的出路，不能让方案卡死在「校验驳回」）
+// 从任务 ranking 顺位往下找下一颗可换的卫星，原地更新本方案，状态回「待确认」
+dispatchApi.post("/plans/:id/reassign", (req, res) => {
+  const plan = db.prepare("SELECT * FROM directPlans WHERE id=?").get(+req.params.id);
+  if (!plan) return res.status(404).json({ error: 'plan not found' });
+  if (!['待确认', '校验驳回'].includes(plan.status))
+    return res.status(400).json({ error: `状态 ${plan.status} 不可换星（仅待确认/校验驳回可换）` });
+  const ranking = db.prepare(`
+    SELECT r.*, c.satName, c.company, c.satNoradId, c.overpassTime, c.windowStart, c.windowEnd, c.imgWinStart, c.imgWinEnd, c.minDistKm
+    FROM rankings r JOIN candidates c ON c.id=r.candidateId
+    WHERE r.taskId=? AND c.filtered=0 ORDER BY r.rank`).all(plan.taskId);
+  if (ranking.length === 0) return res.status(400).json({ error: '该任务无可用候选排序，无法换星，请先重新计算候选' });
+  // 候选去重（同星多过顶窗口取最优顺位）；排除当前已驳回的这颗
+  const seen = new Set();
+  const rankedSats = [];
+  for (const r of ranking) {
+    if (seen.has(r.satNoradId)) continue;
+    seen.add(r.satNoradId);
+    rankedSats.push(r);
+  }
+  const curIdx = rankedSats.findIndex(r => r.satNoradId === plan.satNoradId);
+  // 默认优先跳到下一颗幅宽可覆盖（imgWin 非空）的；传 force=true 则严格按顺位下一颗
+  const force = !!req.body?.force;
+  let next = null;
+  if (force) {
+    next = rankedSats[curIdx + 1] ?? null;
+  } else {
+    next = rankedSats.find((r, i) => i > curIdx && r.imgWinStart && r.imgWinEnd)
+      ?? rankedSats.find((r, i) => i > curIdx)
+      // 当前已是最后顺位时回绕到第一颗可覆盖的（非当前星）
+      ?? rankedSats.find((r, i) => i !== curIdx && r.imgWinStart && r.imgWinEnd)
+      ?? (rankedSats.length > 1 ? rankedSats[0] : null);
+  }
+  if (!next || next.satNoradId === plan.satNoradId) return res.status(400).json({ error: '已没有其他候选卫星可换（该任务排序中仅此一颗）' });
+  const pos = rankedSats.findIndex(r => r.satNoradId === next.satNoradId) + 1;
+  db.prepare(`UPDATE directPlans SET satNoradId=?, satName=?, company=?, windowStart=?, windowEnd=?, overpassTime=?,
+    imgWinStart=?, imgWinEnd=?, minDistKm=?, commands=NULL, validation=NULL, timeline=NULL, sequenceStart=NULL, paramPack=NULL, arcInfo=NULL,
+    status='待确认', updatedAt=datetime('now') WHERE id=?`)
+    .run(next.satNoradId, next.satName, next.company, next.windowStart, next.windowEnd, next.overpassTime,
+      next.imgWinStart, next.imgWinEnd, next.minDistKm ?? null, plan.id);
+  db.prepare("INSERT INTO dispatchLog (taskId, action, detail) VALUES (?, '直控换星', ?)")
+    .run(plan.taskId, JSON.stringify({ planId: plan.id, from: plan.satName, to: next.satName, toNorad: next.satNoradId, 顺位: `${pos}/${rankedSats.length}`, 幅宽可覆盖: !!(next.imgWinStart && next.imgWinEnd) }));
+  res.json({ ok: true, planId: plan.id, from: plan.satName, to: next.satName, toNorad: next.satNoradId, rankPos: pos, totalRanked: rankedSats.length, imgWinCovered: !!(next.imgWinStart && next.imgWinEnd) });
+});
+
 dispatchApi.post("/plans/:id/confirm", (req, res) => {
   const { stage, checklist } = req.body ?? {}; // stage: 方案|上注；checklist: 上注前人工核验勾选
   const plan = db.prepare("SELECT * FROM directPlans WHERE id=?").get(+req.params.id);
@@ -765,7 +841,7 @@ dispatchApi.post("/plans/:id/complete", (req, res) => {
 });
 
 dispatchApi.get("/plans", (req, res) => {
-  res.json(db.prepare("SELECT * FROM directPlans ORDER BY id DESC LIMIT 100").all());
+  res.json(db.prepare("SELECT p.*, t.taskName, t.targetName FROM directPlans p LEFT JOIN tasks t ON t.id=p.taskId ORDER BY p.id DESC LIMIT 100").all());
 });
 dispatchApi.get("/plans/:id", (req, res) => {
   const p = db.prepare("SELECT * FROM directPlans WHERE id=?").get(+req.params.id);

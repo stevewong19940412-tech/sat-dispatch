@@ -26,6 +26,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   // 派给公司方式选择弹窗（指定第一公司/全候选竞价/挂池抢单）
   const [assignMode, setAssignMode] = useState(null);
   const [uplinkChecklist, setUplinkChecklist] = useState({});
+  // 直控参数包查看抽屉（解算通过后即可查看完整参数包，不等上注核验）
+  const [packDrawerId, setPackDrawerId] = useState(null);
 
   const load = useCallback(async () => {
     // 并行拉取（原来是 5 个串行 await，最慢者拖累全部）
@@ -142,10 +144,17 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
     try {
       if (action === 'generate') {
         const r = await api(`/dispatch/plans/${planId}/generate`, { method: 'POST' });
+        const errMsg = (r.validation.errors ?? []).map(e => typeof e === 'object' ? (e.detail?.conclusion || e.msg) : e).join('；');
         setMsg({ ok: r.validation.pass, text: r.validation.pass
-          ? `✅ 参数包已生成并通过校验（${r.commands.length} 条动作，总时长 ${r.validation.totalDuration}s）——下方方案卡片状态已更新为「待核验下发」`
-          : `❌ 校验驳回：${r.validation.errors.join('；')}` });
+          ? `✅ 参数包已生成并通过校验（${r.commands.length} 条动作，总时长 ${r.validation.totalDuration}s）——下方方案卡片状态已更新为「待核验下发」，可点「查看直控参数包」`
+          : `❌ 校验驳回：${errMsg}` });
         await load();
+      } else if (action === 'reassign') {
+        const r = await api(`/dispatch/plans/${planId}/reassign`, { method: 'POST', body: JSON.stringify({ force: false }) });
+        setMsg({ ok: true, text: `🔄 已换星：${r.from} → ${r.to}（候选顺位 ${r.rankPos}/${r.totalRanked}${r.imgWinCovered ? '，幅宽可覆盖' : '，注意：该候选幅宽也罩不住目标'}），正在自动重新解算…` });
+        await load();
+        await planAction(planId, 'generate');
+        return;
       } else if (action === '方案' || action === '上注') {
         await api(`/dispatch/plans/${planId}/confirm`, { method: 'POST', body: JSON.stringify({ stage: action }) });
       } else if (action === 'complete') {
@@ -186,8 +195,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
         </div>
       </div>
 
-      {/* Tab */}
-      <div style={{ display: 'flex', gap: 4, padding: '10px 16px 0' }}>
+      {/* Tab（顶栏 fixed 不占文档流， paddingTop 避开避免被统计条遮挡） */}
+      <div style={{ display: 'flex', gap: 4, padding: '56px 16px 0' }}>
         {[['tasks', '任务管理'], ['orders', '订单跟踪'], ['plans', '应急直控'], ['pool', '任务池'], ['companies', '公司生态']].map(([k, label]) => (
           <button key={k} data-tab={k} style={{ background: 'transparent', border: 'none', color: 'inherit', font: 'inherit', padding: 0, cursor: 'pointer' }}
             style={{
@@ -212,7 +221,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
           runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} setAssignMode={setAssignMode} setMsg={setMsg} setTab={setTab} load={load} planAction={planAction} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
-        {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} />}
+        {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} setPackDrawerId={setPackDrawerId} />}
+        {tab === 'plans' && <PlanPackDrawer plan={plans.find(x => x.id === packDrawerId)} onClose={() => setPackDrawerId(null)} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
         {tab === 'companies' && <CompaniesTab companies={companies} />}
       </div>
@@ -617,7 +627,7 @@ function OrdersTab({ orders, advanceOrder }) {
 }
 
 // ─── 应急直控 Tab ─────────────────────────────────────────────────────────
-function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
+function PlansTab({ plans, planAction, busy, setUplinkVerify, setPackDrawerId }) {
   return (
     <div>
       {plans.length === 0 && <div style={{ textAlign: 'center', color: 'var(--text-dim)', padding: 30 }}>暂无直控方案（应急任务分流后自动生成）</div>}
@@ -647,13 +657,55 @@ function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
               ))}
             </div>
           )}
-          {/* 校验结果 */}
+          {/* 校验结果：驳回时逐条展开原因+数值诊断；通过时给参数包查看入口 */}
           {(() => {
             const v = typeof p.validation === 'string' ? (() => { try { return JSON.parse(p.validation); } catch { return null; } })() : p.validation;
             if (!v || !v.errors) return null;
             return (
             <div style={{ fontSize: 11.5, marginBottom: 8, color: v.pass ? 'var(--accent)' : 'var(--danger)' }}>
-              独立校验：{v.pass ? `✅ 通过（总时长 ${v.totalDuration}s，开关机/间隔/固存/参数 全部合规）` : `❌ ${(v.errors ?? []).join('；') || '校验未通过（无明细）'}`}
+              独立校验：{v.pass
+                ? `✅ 通过（总时长 ${v.totalDuration}s，开关机/间隔/固存/参数 全部合规）`
+                : `❌ ${(v.errors ?? []).map(e => typeof e === 'object' ? e.msg : e).join('；') || '校验未通过（无明细）'}`}
+              {v.pass && p.paramPack && (
+                <button className="btn secondary" data-action="view-pack" data-plan-id={p.id}
+                  style={{ padding: '2px 10px', fontSize: 11, marginLeft: 10 }}
+                  onClick={() => setPackDrawerId(p.id)}>📄 查看直控参数包</button>
+              )}
+            </div>
+            );
+          })()}
+          {p.status === '校验驳回' && (() => {
+            const v = typeof p.validation === 'string' ? (() => { try { return JSON.parse(p.validation); } catch { return null; } })() : p.validation;
+            const detailed = (v?.errors ?? []).filter(e => typeof e === 'object' && e?.detail);
+            return (
+            <div style={{ fontSize: 11.5, marginBottom: 8, padding: '8px 12px', borderRadius: 4, background: 'rgba(244,82,94,0.06)', border: '1px solid rgba(244,82,94,0.3)' }}>
+              {detailed.map((e, i) => {
+                const d = e.detail;
+                return (
+                  <div key={i} style={{ marginBottom: detailed.length > 1 && i < detailed.length - 1 ? 10 : 0 }}>
+                    <div style={{ fontWeight: 600, color: 'var(--danger)' }}>❌ {e.msg}</div>
+                    <table className="mission-table" style={{ fontSize: 10.5, margin: '6px 0', maxWidth: 480 }}>
+                      <tbody>
+                        <tr><td style={{ color: 'var(--text-dim)' }}>卫星幅宽</td><td style={{ fontFamily: 'var(--font-mono)' }}>{d.swathKm} km（半宽 {d.halfKm} km）</td></tr>
+                        {d.minDistKm != null && <tr><td style={{ color: 'var(--text-dim)' }}>过境最近距离</td><td style={{ fontFamily: 'var(--font-mono)' }}>{Math.round(d.minDistKm * 10) / 10} km</td></tr>}
+                        {d.overByKm != null && <tr><td style={{ color: 'var(--danger)', fontWeight: 600 }}>差多少才够拍</td><td style={{ fontFamily: 'var(--font-mono)', color: 'var(--danger)' }}>超出 {d.overByKm} km</td></tr>}
+                        {d.slewDeg != null && <tr><td style={{ color: 'var(--text-dim)' }}>TCA 侧摆角</td><td style={{ fontFamily: 'var(--font-mono)' }}>{Math.round(d.slewDeg * 10) / 10}°</td></tr>}
+                        {d.actualAltKm != null && <tr><td style={{ color: 'var(--text-dim)' }}>轨道高度</td><td style={{ fontFamily: 'var(--font-mono)' }}>{Math.round(d.actualAltKm)} km</td></tr>}
+                      </tbody>
+                    </table>
+                    <div style={{ color: 'var(--text-main)', fontSize: 11 }}>{d.conclusion}</div>
+                    <div style={{ color: 'var(--warn)', fontSize: 11, marginTop: 2 }}>建议：{d.advice}</div>
+                  </div>
+                );
+              })}
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--border)' }}>
+                <span style={{ color: 'var(--text-dim)' }}>此候选物理上拍不到时，可切换任务候选排序中的下一颗卫星重新解算，无需重新派单：</span>
+                <button className="btn secondary" disabled={busy} data-action="reassign-sat" data-plan-id={p.id}
+                  style={{ padding: '2px 10px', fontSize: 11, marginLeft: 10 }}
+                  onClick={() => planAction(p.id, 'reassign')}>
+                  {busy ? '⏳ 换星解算中…' : '🔄 换一颗候选卫星解算'}
+                </button>
+              </div>
             </div>
             );
           })()}
@@ -674,12 +726,94 @@ function PlansTab({ plans, planAction, busy, setUplinkVerify }) {
               {busy ? '⏳ 解算中（约10~30秒）…' : p.status === '待确认' ? '① 计算直控参数包' : '重算参数包'}
             </button>
             {p.status === '待核验下发' && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, '方案')}>② 方案确认（值班）</button>}
+            {['待核验下发', '方案已确认'].includes(p.status) && p.paramPack && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => setPackDrawerId(p.id)} data-action="view-pack" data-plan-id={p.id}>📄 查看直控参数包</button>}
             {p.status === '方案已确认' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }}
-              onClick={() => setUplinkVerify(p)}>③ 核验参数包 → 确认上注</button>}
+              onClick={() => setUplinkVerify(p)}>③ 核验并确认上注</button>}
             {p.status === '执行中' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'complete')}>④ 执行完成回写</button>}
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── 直控参数包查看抽屉（解算通过后的最终产物，独立于上注核验弹窗） ──────
+function PlanPackDrawer({ plan, onClose }) {
+  if (!plan) return null;
+  let pack = null, v = null;
+  try { pack = plan.paramPack ? JSON.parse(plan.paramPack) : null; } catch {}
+  try { v = plan.validation ? JSON.parse(plan.validation) : null; } catch {}
+  const commands = Array.isArray(pack?.commands) ? pack.commands : [];
+  const img = commands.find(c => c.action === '成像');
+  const ip = img?.param ?? {};
+  return (
+    <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal" style={{ width: 560, maxHeight: '86vh', overflowY: 'auto' }}>
+        <div className="modal-header">直控参数包 · {plan.satName}
+          <span className="status-pill" style={{ background: 'rgba(45,212,167,0.15)', color: 'var(--accent)', marginLeft: 10 }}>解算通过 · 待上注</span>
+          <button className="close-btn" style={{ marginLeft: 'auto' }} onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body" style={{ fontSize: 12, lineHeight: 1.9 }}>
+          {!pack ? <div style={{ color: 'var(--danger)' }}>参数包未生成，请先解算。</div> : (<>
+            {/* 一、任务与卫星标识 */}
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--accent)', margin: '4px 0' }}>① 任务与卫星</div>
+            <table className="mission-table" style={{ fontSize: 11 }}>
+              <tbody>
+                <tr><td style={{ width: 110, color: 'var(--text-dim)' }}>目标</td><td>{plan.taskName || pack.target?.name || '—'}（{pack.target?.lat?.toFixed?.(4) ?? '—'}, {pack.target?.lon?.toFixed?.(4) ?? '—'}）</td></tr>
+                <tr><td style={{ color: 'var(--text-dim)' }}>执行卫星</td><td>{pack.satName}（NORAD {pack.satNoradId}）· {plan.company}</td></tr>
+                <tr><td style={{ color: 'var(--text-dim)' }}>载荷</td><td>{pack.payloadSpec?.camera}（幅宽 {pack.payloadSpec?.swathKm}km / 侧摆上限 {pack.payloadSpec?.slewMax}°）</td></tr>
+              </tbody>
+            </table>
+            {/* 二、几何与时序 */}
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--accent)', margin: '10px 0 4px' }}>② 成像几何与时序</div>
+            <table className="mission-table" style={{ fontSize: 11 }}>
+              <tbody>
+                <tr><td style={{ width: 110, color: 'var(--text-dim)' }}>成像时窗</td><td style={{ fontFamily: 'var(--font-mono)' }}>{pack.window.start?.slice(5, 19)} ~ {pack.window.end?.slice(5, 19)} UTC</td></tr>
+                <tr><td style={{ color: 'var(--text-dim)' }}>最近过顶 TCA</td><td style={{ fontFamily: 'var(--font-mono)' }}>{pack.tca?.slice(5, 19)} UTC ｜ 侧摆 {pack.slewDeg}°</td></tr>
+                <tr><td style={{ color: 'var(--text-dim)' }}>成像时段</td><td style={{ fontFamily: 'var(--font-mono)' }}>{pack.imagingStart?.slice(11, 19)} ~ {pack.imagingEnd?.slice(11, 19)} UTC（中点 {pack.imagingCenter?.slice(11, 19)}，已对准 TCA）</td></tr>
+                <tr><td style={{ color: 'var(--text-dim)' }}>条带方向</td><td>{pack.stripDirection}</td></tr>
+              </tbody>
+            </table>
+            {/* 三、成像参数 */}
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--accent)', margin: '10px 0 4px' }}>③ 成像参数</div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-main)' }}>
+              {ip.imagingMode} ｜ TDI {ip.tdiStages} 级（{ip.tdiSource?.startsWith('real') ? '文献值' : '典型值'}）｜ 积分 {ip.integrationMs} ms（像移 {ip.imageMotionVelKmS} km/s 匹配）｜ 增益 {ip.gain} ｜ 量化 {ip.quantBits}bit
+               ｜ 压缩 {ip.compression}:1 {ip.compressionMode} ｜ 预计数据量 {ip.estDataMB} MB
+            </div>
+            {/* 四、指令序列 */}
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--accent)', margin: '10px 0 4px' }}>④ 指令序列（{commands.length} 条，总时长 {v?.totalDuration ?? '—'}s）</div>
+            <table className="mission-table" style={{ fontSize: 10.5 }}>
+              <thead><tr><th>#</th><th>动作</th><th>偏移</th><th>时长</th><th>关键参数</th></tr></thead>
+              <tbody>
+                {commands.map(c => (
+                  <tr key={c.seq}><td>{c.seq}</td><td>{c.action}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)' }}>{c.startOffset}s</td>
+                    <td style={{ fontFamily: 'var(--font-mono)' }}>{c.duration}s</td>
+                    <td style={{ fontSize: 10, color: 'var(--text-dim)' }}>{c.action === '成像' ? `TDI ${c.param?.tdiStages} / 积分 ${c.param?.integrationMs}ms` : c.param ? Object.entries(c.param).slice(0,2).map(([k,val]) => `${k}=${val}`).join(' ') : '—'}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            {/* 五、测控与数传弧段 */}
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--accent)', margin: '10px 0 4px' }}>⑤ 测控上注与数传</div>
+            <table className="mission-table" style={{ fontSize: 11 }}>
+              <tbody>
+                <tr><td style={{ width: 110, color: 'var(--text-dim)' }}>上注弧段</td><td>{pack.uplinkPass
+                  ? <>{pack.uplinkPass.station} {pack.uplinkPass.arcStart?.slice(5, 19)} ~ {pack.uplinkPass.arcEnd?.slice(5, 19)} UTC（maxEl {pack.uplinkPass.maxElDeg}°，{pack.uplinkPass.arcDurationSec}s）{pack.uplinkBudget && ` ｜ 容量预算 ${pack.uplinkBudget.fits ? '✅ 足够' : '❌ 超限'}`}</>
+                  : <span style={{ color: 'var(--danger)' }}>无可用弧段</span>}</td></tr>
+                <tr><td style={{ color: 'var(--text-dim)' }}>数传窗口</td><td>{pack.downlinkPass
+                  ? `${pack.downlinkPass.station} ${pack.downlinkPass.arcStart?.slice(11, 19)} UTC（maxEl ${pack.downlinkPass.maxElDeg}°）`
+                  : '待下一圈过站下传'}</td></tr>
+              </tbody>
+            </table>
+            {/* 校验摘要 */}
+            {v && <div style={{ fontSize: 11.5, marginTop: 10, color: v.pass ? 'var(--accent)' : 'var(--danger)' }}>
+              独立校验：{v.pass ? `✅ 全部通过（总时长 ${v.totalDuration}s）` : '❌ ' + v.errors.map(e => typeof e === 'object' ? e.msg : e).join('；')}</div>}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+              <button className="btn secondary" onClick={onClose}>关闭</button>
+            </div>
+          </>)}
+        </div>
+      </div>
     </div>
   );
 }

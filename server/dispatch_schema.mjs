@@ -179,6 +179,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_task ON orders(taskId);
       db.exec("ALTER TABLE directPlans ADD COLUMN paramPack TEXT");
       console.log("[schema] directPlans.paramPack 列已自动迁移");
     }
+    if (!dpCols.includes("minDistKm")) {
+      db.exec("ALTER TABLE directPlans ADD COLUMN minDistKm REAL");
+      console.log("[schema] directPlans.minDistKm 列已自动迁移");
+    }
   }
   const cols = db.prepare("PRAGMA table_info(candidates)").all().map(c => c.name);
   if (!cols.includes("cloudSource")) {
