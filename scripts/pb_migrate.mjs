@@ -80,6 +80,7 @@ async function ensureCollection(name, cols, relations) {
   const r = await api("/api/collections", "POST", body);
   if (!r.id) throw new Error(`建 collection ${name} 失败: ` + JSON.stringify(r).slice(0, 300));
   console.log(`  [${name}] collection 创建成功（${fields.length} 字段）`);
+  if (!globalThis.__colArr) globalThis.__colArr = [];
   globalThis.__colArr.push(r); // 后续表的 relation 引用需要最新的 collectionId
   return r;
 }
