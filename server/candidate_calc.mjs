@@ -66,7 +66,7 @@ function makeSatrec(sat) {
 // SGP4 是纯函数，track 只依赖 (sat, t0, aheadMin, step)，与条带无关——模块级缓存消除
 // 长窗分段/多条带场景下同一星的重复 SGP4 计算
 const _trackCache = new Map();
-const _TRACK_CACHE_MAX = 64;
+const _TRACK_CACHE_MAX = 4096; // 格网批量任务：95星×N段粗扫+每窗精化都要命中，64 会互相淘汰
 export function sampleTrack(sat, t0, minutesAhead, stepSec = 30) {
   const satrec = makeSatrec(sat);
   if (!satrec) return [];
@@ -123,14 +123,21 @@ export function computeVisibleWindows(sat, strip, opts) {
   // GEO 凝视星判定：24h 星下点经度漂移 <2°（悬停）。GEO 对固定点每天同一时刻同一几何，
   // 分段采样毫无意义且慢（实测 GAOFEN-4 15天窗 11 条带 34s）——整窗一段，粗扫截断
   const probe = sampleTrack(sat, t0, 1440, 300);
+  // 长窗分段：粗扫用 60s 步长（星下点 60s 跑 450km，可见门限几百 km，20s 过密）。
+  // 段边界的 t0 对齐到整 3 天刻度（取模对齐），同任务/跨任务的段完全同 t0 →
+  // sampleTrack 缓存跨任务命中（格网批量任务共享同一批轨道采样，规划耗时降一个量级）
   const isGeoSat = probe.length > 2 && Math.abs(probe[probe.length-1].lon - probe[0].lon) < 0.035; // 弧度≈2°
   if (spanMs > SEG_MS && !isGeoSat) {
     const merged = [];
-    let segStart = t0.getTime();
+    const alignedStart = Math.floor(t0.getTime() / SEG_MS) * SEG_MS; // 对齐到全局段栅格
+    let segStart = alignedStart;
     while (segStart < tEnd) {
       const segEnd = Math.min(segStart + SEG_MS, tEnd);
-      for (const w of computeVisibleWindows(sat, strip, { ...opts, windowStart: new Date(segStart).toISOString(), windowEnd: new Date(segEnd).toISOString() })) {
-        merged.push(w);
+      const wStart = Math.max(segStart, t0.getTime());
+      if (segEnd > wStart) {
+        for (const w of computeVisibleWindows(sat, strip, { ...opts, windowStart: new Date(wStart).toISOString(), windowEnd: new Date(segEnd).toISOString() })) {
+          merged.push(w);
+        }
       }
       segStart = segEnd;
     }
@@ -144,7 +151,8 @@ export function computeVisibleWindows(sat, strip, opts) {
     return dedup.slice(0, 12);
   }
   const aheadMin = Math.ceil(spanMs / 60000) + 60; // 单段最多 3 天+1h缓冲
-  const track = sampleTrack(sat, t0, aheadMin, 20);
+  const coarseStep = spanMs > 2 * 86400000 ? 60 : 20; // 长段粗扫 60s，短窗维持 20s
+  const track = sampleTrack(sat, t0, aheadMin, coarseStep);
   if (track.length === 0) return [];
 
   // 地面覆盖半径（km）：侧摆上限对应
