@@ -5,7 +5,7 @@
 """
 import json, os, sqlite3, sys, urllib.request
 
-CLI_VERSION = 4  # v4: 补齐 sats/companies 实现+--help/-h 别名（v3=自动地址探测+weather/recommend/delete v1=写死地址 v2=基础命令）
+CLI_VERSION = 5  # v5: 新增 preflight 下单前预检（固化 geom/云量双源/光照/长窗口径）（v4=补齐 sats/companies+--help别名 v3=自动地址探测+weather/recommend/delete v1=写死地址 v2=基础命令）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -134,7 +134,7 @@ def main():
         "delete <taskId>": "删除任务单（仅待派单/挂任务池状态；级联清理候选排序订单）",
         'weather <lat> <lon> [天数=3]': "查目标点逐小时云量+最佳成像窗口建议（open-meteo真实预报，72h内）",
         "recommend '<JSON>'": "卫星类型智能推荐（用户未指定光学/SAR时调用），返回推荐类型+理由，交用户确认后再 create",
-                "plans": "直控方案列表",
+                "preflight '<JSON>'": "下单前预检（秒级，不写库）：时窗跨度/光照可行性/云量源边界/geom格式——批量或长窗下单前先跑它",
             },
             "hint": "dispatch --help 与 dispatch help 等效；子命令必须小写精确匹配",
         })
@@ -270,6 +270,77 @@ def main():
 
     elif cmd == "plans":
         out(q("SELECT id, taskId, satName, company, status, overpassTime FROM directPlans ORDER BY id DESC LIMIT 20"))
+
+    elif cmd == "preflight" and arg:
+        # 下单前预检（固化历次撞墙经验，秒级返回，不写库）：
+        # ① geom/时窗/云量源合法性 ② 72h云量边界提示 ③ 光照可行性 ④ 宽窗诊断口径
+        try:
+            body = json.loads(arg)
+        except Exception:
+            die("用法: dispatch preflight '{\"lat\":23.5,\"lon\":120.9,\"obsType\":\"optical\",\"windowStart\":\"...\",\"windowEnd\":\"...\",\"maxCloud\":0.4}'")
+        checks, warns = [], []
+        lat, lon = body.get("lat"), body.get("lon")
+        ws, we = body.get("windowStart"), body.get("windowEnd")
+        obs = body.get("obsType") or "optical"
+        max_cloud = body.get("maxCloud", 0.4)
+        # 1. 时窗跨度与长窗口径
+        from datetime import datetime, timezone as _tz
+        def _p(iso):
+            return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if not ws or not we:
+            checks.append({"item": "时间窗", "ok": False, "msg": "缺 windowStart/windowEnd"})
+        else:
+            try:
+                span_days = (_p(we) - _p(ws)).total_seconds() / 86400
+                if span_days <= 0:
+                    checks.append({"item": "时间窗", "ok": False, "msg": "起止倒置"})
+                else:
+                    checks.append({"item": "时间窗", "ok": True, "msg": f"跨度 {span_days:.1f} 天"})
+                    if span_days > 3:
+                        warns.append(f"长窗（{span_days:.0f}天）：候选云量中超过建单时刻 72h 的部分为模拟气象场（cloudSource=simulated），无物理意义；批量下单建议 maxCloud 放宽到 1，临期 72h 内复核真实云量再取舍")
+                    # 光照可行性：光学任务且时窗短（<1.5天）时，逐小时检查窗内是否有太阳高度角≥10°的时段
+                    if obs == "optical" and span_days <= 1.5:
+                        import math
+                        def sun_el(la, lo, dt):
+                            rad = math.pi/180
+                            d = (dt.timestamp() - 946728000) / 86400  # 自J2000
+                            L = (280.460 + 0.9856474*d) % 360
+                            g = ((357.528 + 0.9856003*d) % 360) * rad
+                            lam = (L + 1.915*math.sin(g) + 0.020*math.sin(2*g)) * rad
+                            decl = math.asin(math.sin(lam)*math.sin(23.439*rad))
+                            utc_h = dt.hour + dt.minute/60
+                            ha = (utc_h*15 - 180 + lo) * rad
+                            la_r = la*rad
+                            se = math.sin(la_r)*math.sin(decl) + math.cos(la_r)*math.cos(decl)*math.cos(ha)
+                            return math.asin(max(-1, min(1, se))) / rad
+                        good_h = 0
+                        t = _p(ws)
+                        while t < _p(we):
+                            if sun_el(lat or 0, lon or 0, t) >= 10: good_h += 1
+                            t = t.replace(microsecond=0)
+                            from datetime import timedelta
+                            t += timedelta(hours=1)
+                        checks.append({"item": "光照可行性", "ok": good_h > 0,
+                          "msg": f"窗内太阳高度角≥10°的小时数: {good_h}" + ("" if good_h else "——光学无解，改 SAR 或改白天窗")})
+            except Exception as e:
+                checks.append({"item": "时间窗", "ok": False, "msg": f"时间格式解析失败: {e}"})
+        # 2. 云量源边界提示
+        if max_cloud is not None and max_cloud < 1:
+            from datetime import timedelta
+            try:
+                lead = (_p(ws) - datetime.now(_tz.utc)).total_seconds() / 3600
+                if lead > 72:
+                    warns.append(f"时窗起点距现在 {lead:.0f}h，已超 open-meteo 72h 预报期：候选云量将全部是模拟场，maxCloud={max_cloud} 筛选无意义")
+            except Exception:
+                pass
+        # 3. geom 格式提醒（点任务走 create 自动转，面任务必须 coords）
+        if body.get("geomType") in ("area", "polygon") and body.get("coords") is None and lat is not None:
+            warns.append("面任务必须传 coords=[[lat,lon],...]（不是 GeoJSON）；传 GeoJSON 会静默 0 候选")
+        # 4. 宽窗诊断口径
+        if body.get("diagnose"):
+            warns.append("诊断任务口径：maxCloud=1 + 宽窗（≥3天）先验证链路（candidates>0 且 gapStats 非空），再筛真实窗口；gapStats 为空且 candidates=0 先怀疑 geom 格式")
+        out({"ok": all(c["ok"] for c in checks), "checks": checks, "warnings": warns,
+             "note": "预检不写库；正式下单走 create/order-intake"})
 
     else:
         die(f"未知命令 {cmd}，执行 dispatch help 查看用法")
