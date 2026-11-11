@@ -182,26 +182,29 @@ export async function runSetup() {
   const cols2 = await api("/api/collections");
   const arr2 = cols2.items || cols2;
   const REL_FIELDS = [
-    { table: "candidates", field: "task", target: "tasks" },
-    { table: "rankings", field: "task", target: "tasks" },
-    { table: "rankings", field: "candidate", target: "candidates" },
-    { table: "orders", field: "task", target: "tasks" },
-    { table: "directPlans", field: "task", target: "tasks" },
-    { table: "fulfillmentLog", field: "task", target: "tasks" },
-    { table: "taskPool", field: "task", target: "tasks" },
-    { table: "dispatchLog", field: "task", target: "tasks" },
-    { table: "dispatchLog", field: "order", target: "orders" },
+    { table: "candidates", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "rankings", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "rankings", field: "candidateId", pbField: "candidate", target: "candidates" },
+    { table: "orders", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "directPlans", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "fulfillmentLog", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "taskPool", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "dispatchLog", field: "taskId", pbField: "task", target: "tasks" },
+    { table: "dispatchLog", field: "orderId", pbField: "order", target: "orders" },
   ];
   let fixedRel = 0;
   for (const spec of REL_FIELDS) {
     const col = arr2.find(c => c.name === spec.table);
     if (!col) continue;
+    // 兼容两种命名：降级 number 保留原列名（taskId），正常 relation 是 pbField（task）
     const f = col.fields.find(x => x.name === spec.field);
-    if (!f || f.type === "relation") continue;
+    const fRel = col.fields.find(x => x.name === spec.pbField);
+    if (fRel && fRel.type === "relation") continue; // 已是 relation
+    if (!f) continue; // 两种名都不存在
     const target = arr2.find(c => c.name === spec.target);
     if (!target) continue;
     const newFields = col.fields.map(x => x.name === spec.field
-      ? { name: spec.field, type: "relation", collectionId: target.id, cascadeDelete: false, maxSelect: 1 }
+      ? { name: spec.pbField, type: "relation", collectionId: target.id, cascadeDelete: false, maxSelect: 1 }
       : x);
     const r = await api(`/api/collections/${col.id}`, "PATCH", { fields: newFields });
     if (r.id) { fixedRel++; console.log(`[pb_setup] [${spec.table}.${spec.field}] ${f.type} → relation 自愈`); }
