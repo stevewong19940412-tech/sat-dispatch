@@ -121,9 +121,28 @@ async function migrateTable(name, cols, relations, sqlite) {
   return { src: count, dst };
 }
 
+// counters 集合不在 seed SQLite 里（旧实现是 SQLite INTEGER PRIMARY KEY 自增），
+// 但 pbNextSeq 依赖它做 taskNo/orderNo 序列——不建就会每单 500「序列获取失败」。
+async function ensureCountersCollection() {
+  const existing = await api("/api/collections");
+  const arr = existing.items || existing;
+  if (arr.find(c => c.name === "counters")) return;
+  const r = await api("/api/collections", "POST", {
+    name: "counters", type: "base",
+    listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+    fields: [
+      { name: "name", type: "text", required: true },
+      { name: "value", type: "number" },
+    ],
+  });
+  if (!r.id) throw new Error("建 counters 失败: " + JSON.stringify(r).slice(0, 200));
+  console.log("[pb_setup] [counters] collection 创建");
+}
+
 export async function runSetup() {
   const t0 = Date.now();
   await waitPbHealthy();
+  await ensureCountersCollection().catch(e => console.error("[pb_setup] counters 自举失败:", e.message));
   // 开 batch
   await api("/api/settings", "PATCH", { batch: { enabled: true, maxRequests: 500, timeout: 120 } }).catch(() => null);
   // 清 migrations 快照（防按字母序重放断链）——容器内 PB data 目录

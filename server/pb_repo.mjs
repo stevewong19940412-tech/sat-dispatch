@@ -126,17 +126,69 @@ export async function pbBatch(ops) { // ops: [{table, method, data, recordId?, o
   return results;
 }
 // 原子计数器：替代旧 taskNo/orderNo 序列（counters collection，CAS 重试）
+// 修复记录：①seed 库无 counters 表时集合根本没建 → 以前每轮读/建/写全 500 且被 catch 吞掉，
+// 20 轮空转后报「并发冲突超限」，误导排查；②现在首建、失败留痕，并带一个按库内最大序号的保底。
+let _seqFallback = {};
 export async function pbNextSeq(name) {
+  let lastErr = null;
   for (let i = 0; i < 20; i++) {
-    const r = await api(`/api/collections/counters/records?filter=${encodeURIComponent(`name='${name}'`)}`).catch(() => null);
-    const rec = r?.items?.[0];
-    if (!rec) {
-      const c = await api("/api/collections/counters/records", "POST", { name, value: 1 }).catch(() => null);
-      if (c?.id) return 1;
-      continue;
+    try {
+      const r = await api(`/api/collections/counters/records?filter=${encodeURIComponent(`name='${name}'`)}&perPage=1`);
+      const rec = r?.items?.[0];
+      if (!rec) {
+        try {
+          const c = await api("/api/collections/counters/records", "POST", { name, value: 1 });
+          if (c?.id) return 1;
+        } catch (e) {
+          if (e.status === 404) throw e; // 集合不存在：立即上抛，不再空转
+          if (e.status !== 400 && e.status !== 409) throw e; // 并发别人先建了，下一轮读到即可
+        }
+        continue;
+      }
+      const next = Number(rec.value || 0) + 1;
+      const u = await api(`/api/collections/counters/records/${rec.id}`, "PATCH", { value: next });
+      if (Number(u?.value) === next) return next;
+    } catch (e) {
+      lastErr = e;
+      if (e.status === 404) break;
     }
-    const u = await api(`/api/collections/counters/records/${rec.id}`, "PATCH", { value: rec.value + 1 }).catch(() => null);
-    if (u?.value === rec.value + 1) return rec.value + 1;
+    await new Promise(res => setTimeout(res, 10 + i * 10));
   }
-  throw new Error(`序列 ${name} 获取失败（并发冲突超限）`);
+  // 计数器不可用时退到库内最大序号（宁可跳号，不可阻断下单）
+  const fb = await _seqFallbackNext(name).catch(() => null);
+  if (fb) {
+    console.warn(`[pbNextSeq] ${name} 计数器不可用（${lastErr?.message?.slice(0, 120) || "并发冲突"}），退保单号 ${fb}`);
+    return fb;
+  }
+  throw new Error(`序列 ${name} 获取失败：${lastErr ? lastErr.message.slice(0, 200) : "并发冲突超限"}`);
+}
+async function _seqFallbackNext(name) {
+  const now = _seqFallback[name] || 0;
+  let fromDb = 0;
+  if (name === "taskNo") {
+    const r = await pbList("tasks", { sort: "-oldId", limit: 1, fields: "oldId" });
+    fromDb = Number(r.items?.[0]?.oldId || 0);
+  } else if (name === "orderNo") {
+    const r = await pbList("orders", { sort: "-oldId", limit: 1, fields: "oldId" });
+    fromDb = Number(r.items?.[0]?.oldId || 0);
+  }
+  const base = Math.max(now, fromDb);
+  // taskNo 是跨日 3 位日号：日期变了就从 1 重起，避免序号无限膨胀
+  const ymd = new Date(); const today = `${ymd.getUTCFullYear()}${String(ymd.getUTCMonth() + 1).padStart(2, "0")}${String(ymd.getUTCDate()).padStart(2, "0")}`;
+  let fb;
+  if (name === "taskNo") {
+    // 读当天最大号：任务列表按 oldId 降序，取其中当天任务号的序号
+    const r = await pbList("tasks", { sort: "-oldId", limit: 60, fields: "taskNo" });
+    let maxSeq = 0;
+    for (const t of r.items || []) {
+      const m = String(t.taskNo || "").match(/^RSBH-\d{8}-(\d+)$/);
+      if (m && String(t.taskNo).includes(today)) maxSeq = Math.max(maxSeq, Number(m[1]));
+    }
+    fb = Math.max(maxSeq + 1, 1);
+    _seqFallback[name] = fb;
+  } else {
+    fb = base + 1;
+    _seqFallback[name] = fb;
+  }
+  return fb;
 }

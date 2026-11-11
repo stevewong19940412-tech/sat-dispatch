@@ -1,6 +1,7 @@
 FROM registry.cn-beijing.aliyuncs.com/bladeai/blade-sandbox:v0.0.33
 WORKDIR /app
-COPY server/vendor_node_modules/ node_modules/
+COPY server/vendor_node_modules.tar.gz /tmp/vendor.tgz
+RUN mkdir -p node_modules && tar xzf /tmp/vendor.tgz -C node_modules && rm /tmp/vendor.tgz
 COPY server/ server/
 COPY client/dist/ client/dist/
 COPY data/satplanning.db data/seed-satplanning.db
