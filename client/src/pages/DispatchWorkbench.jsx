@@ -210,7 +210,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
 
       <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}>
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
-          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} setAssignMode={setAssignMode} />}
+          runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} setAssignMode={setAssignMode} setMsg={setMsg} setTab={setTab} load={load} planAction={planAction} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
         {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
