@@ -339,7 +339,7 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
 
   const opts = {
     windowStart: task.windowStart, windowEnd: task.windowEnd,
-    maxSlewDeg: task.maxSlewDeg ?? 45,
+    maxSlewDeg: task.maxSlewDeg || 45, // PB number 未设读回 0（SQLite 有 DEFAULT 45，PB 没有）——0 会让可见半径归零、候选全空
     minElevSunDeg: 10,
   };
   const strips = normalizeTaskStrips(task, 12);
@@ -538,14 +538,15 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     }
     // top 候选优选"幅宽可覆盖"（imgWin 非空）的，排序分相同前提下拍到 > 拍不到
     const top = ranking.find(r => r.imgWinStart && r.imgWinEnd) ?? ranking[0];
+    const newPlanOldId = await pbNextOldId("directPlans");
     const [planRec] = await pbBatch([
-      { table: "directPlans", data: { task: ref.rid, satNoradId: top.satNoradId, satName: top.satName, company: top.company,
+      { table: "directPlans", oldId: newPlanOldId, data: { oldId: newPlanOldId, task: ref.rid, satNoradId: top.satNoradId, satName: top.satName, company: top.company,
         windowStart: top.windowStart, windowEnd: top.windowEnd, overpassTime: top.overpassTime,
         imgWinStart: top.imgWinStart ?? "", imgWinEnd: top.imgWinEnd ?? "", minDistKm: top.minDistKm ?? 0, status: '待确认' } },
       { table: "tasks", method: "UPDATE", recordId: ref.rid, data: { status: '直控执行中' } },
     ]);
     if (!planRec?.ok) return res.status(500).json({ error: '直控方案落库失败', detail: planRec?.data });
-    return res.json({ channel, rule, planId: top.rank ?? planRec.data.id, topRank: top });
+    return res.json({ channel, rule, planId: newPlanOldId, topRank: top });
   }
 
   // 普通通道（PB 迁移：订单/任务状态/派发留痕/询价单批量在 pbBatch 内一次性提交，原子性同旧事务）
