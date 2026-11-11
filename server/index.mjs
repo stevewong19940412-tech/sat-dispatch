@@ -218,4 +218,6 @@ app.get("/*any", (req, res, next) => {
 const PORT = process.env.PORT || 8600;
 createServer(app).listen(PORT, "0.0.0.0", () => {
   console.log(`[satplanning] API server on 0.0.0.0:${PORT}`);
+  // PB 迁移（幂等，异步不阻塞端口 probe）：确保 collections 与种子数据就绪
+  import("./pb_setup.mjs").then(m => m.runSetup()).catch(e => console.error("[pb_setup] 失败:", e.message));
 });
