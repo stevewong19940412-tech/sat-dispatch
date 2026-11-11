@@ -171,6 +171,26 @@ export function computeVisibleWindows(sat, strip, opts) {
         imgWinEnd = p.t;
       }
     }
+    // 采样精化（2026-11-11）：20s 步进对幅宽穿越窗（仅 1.6s 级）漏检率高——
+    // 在粗扫 imgWin 或 TCA ±60s 做 1s 细扫，重定覆盖窗边界
+    {
+      const tcaRef = imgWinStart ?? tcaT;
+      const fineStart = new Date(tcaRef - 60000).getTime();
+      const fineEnd = new Date(tcaRef + 60000).getTime();
+      const satrec = makeSatrec(sat);
+      let s = null, e = null;
+      for (let t = fineStart; t <= fineEnd; t += 1000) {
+        const d = new Date(t);
+        try {
+          const pv = satellite.propagate(satrec, d);
+          if (!pv?.position || typeof pv.position === 'boolean') continue;
+          const geo = satellite.eciToGeodetic(pv.position, satellite.gstime(d));
+          const dKm = haversineKm(satellite.degreesLat(geo.latitude), satellite.degreesLong(geo.longitude), strip.lat, strip.lon);
+          if (dKm <= footprintHalfKm) { if (s === null) s = d; e = d; }
+        } catch { /* skip */ }
+      }
+      if (s) { imgWinStart = s.toISOString(); imgWinEnd = e.toISOString(); }
+    }
     return {
       start: fStart, end: fEnd,          // 姿态可及窗（可见弧段）
       imgWinStart: imgWinStart,          // 成像覆盖窗起点（幅宽内；null=整个过境幅宽都罩不住目标）
