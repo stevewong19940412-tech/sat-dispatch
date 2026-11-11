@@ -100,13 +100,16 @@ export async function pbDelete(table, recordId) {
   return api(`/api/collections/${COL(table)}/records/${recordId}`, "DELETE");
 }
 // 批量（PB batch；≤200/批），返回逐条结果
+// method 支持 HTTP 原生值（POST/PATCH/DELETE/PUT）与业务别名（CREATE→POST、UPDATE→PATCH）——
+// PB 0.39 的 batch 校验只认 HTTP 方法名，别名在这里归一
+const _METHOD_ALIAS = { CREATE: "POST", UPDATE: "PATCH", UPSERT: "PUT" };
 export async function pbBatch(ops) { // ops: [{table, method, data, recordId?, oldId?}]
   const results = [];
   for (let i = 0; i < ops.length; i += 200) {
     const chunk = ops.slice(i, i + 200);
     await pbAuth();
     const body = { requests: chunk.map(op => ({
-      method: op.method || "POST",
+      method: _METHOD_ALIAS[(op.method || "POST").toUpperCase()] || op.method || "POST",
       url: `/api/collections/${COL(op.table)}/records${op.recordId ? "/" + op.recordId : ""}`,
       body: op.data,
     }))};
