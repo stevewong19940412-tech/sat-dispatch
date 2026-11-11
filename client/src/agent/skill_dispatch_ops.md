@@ -4,12 +4,16 @@ description: 查询与操作遥感卫星统一调度系统时使用——下单�
 ---
 # 调度系统操作 SOP
 
-业务 CLI 随本 skill 安装在 skill 目录内（`dispatch_cli.py`）。调用方式：
+业务 CLI 随本 skill 安装在 skill 目录内（`dispatch_cli.py`，当前 **v7**）。调用方式：
 
 ```bash
 CLI=$(find /root/.blade/runtime/*/skills/dispatch-ops -name dispatch_cli.py 2>/dev/null | head -1)
 python3 "$CLI" <子命令>   # 或先 cp "$CLI" /usr/local/bin/dispatch && chmod +x 之，直接 dispatch <命令>
 ```
+
+## 查询通道（v7 起，_sql 已弃用）
+
+**`POST /dispatch/_sql` 已随 PocketBase 迁移移除，不再可用**。CLI 的 `q()` 已重写为 PocketBase REST 直查（`http://127.0.0.1:8091`，可变量 `DISPATCH_PB_URL/ADMIN/PASS` 覆盖）：已知简单查询模式（tasks/orders/directPlans/satellites 的列表、按 id/taskNo 查详情、rankings JOIN candidates）自动翻译成 PB filter，调用方无感知；翻译不了的 SQL 会报错并列出等价 PB 查询建议。直接手写 PB filter 时的语法：字段=值、`&&`/`||` 组合、`~` 模糊（支持 `%` 通配）、relation 用 `task.oldId=<旧数字id>`；旧数字 id 存于每表 `oldId` 字段，按 id 排序用 `sort=-oldId`。
 
 ## 铁律（违反任何一条都曾真实翻车）
 

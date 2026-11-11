@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """遥感卫星统一调度系统业务 CLI（智能体通道）
 智能体通过 Bash 直接调用：dispatch <子命令> [参数]
-数据来源：调度系统 API（127.0.0.1 内部）与 SQLite 库
+数据来源：调度系统 API（127.0.0.1 内部）与 PocketBase 实例
 """
-import json, os, sqlite3, sys, urllib.request
+import json, os, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 6  # v6: 新增 batch-create 批量建单刚性入口（单事务原子落库+逐条成败+可选确认下发）（v4=补齐 sats/companies+--help别名 v3=自动地址探测+weather/recommend/delete v1=写死地址 v2=基础命令）
+CLI_VERSION = 7  # v7: q() 从 POST /_sql(SQL直查) 重写为 PocketBase REST(filter翻译)，_sql 已随 PB 迁移弃用（v6=批量建单 v4=补齐 sats/companies+--help v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -77,8 +77,234 @@ def api_req(path, method="GET", body=None):
         die(f"API 调用失败: {e}")
 
 def q(sql, args=()):
-    # 便捷查询统一走 API（CLI 不直接连库，保持部署解耦）
-    return api_req("/_sql", "POST", {"sql": sql, "args": list(args)})
+    # 便捷查询：SQL 已随 PocketBase 迁移弃用（POST /_sql 移除）。
+    # 保持签名兼容，内部把已知简单查询模式翻译成 PB REST（filter/sort/perPage），
+    # 翻译不了的 SQL 报错并给出等价 PB 查询建议。
+    return _pb_query(sql, list(args))
+
+# ─── PocketBase 直查通道（v7）───────────────────────────────────────────────
+PB_URL = os.environ.get("DISPATCH_PB_URL", "http://127.0.0.1:8091")
+PB_ADMIN = os.environ.get("DISPATCH_PB_ADMIN", "admin@sat.local")
+PB_PASS = os.environ.get("DISPATCH_PB_PASS", "SatDispatch2026!")
+_pb_token = None
+
+def _pb_auth():
+    global _pb_token
+    if _pb_token: return _pb_token
+    body = json.dumps({"identity": PB_ADMIN, "password": PB_PASS}).encode()
+    req = urllib.request.Request(PB_URL + "/api/collections/_superusers/auth-with-password",
+                                 data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        _pb_token = json.loads(r.read().decode())["token"]
+    return _pb_token
+
+def _pb_api(path):
+    req = urllib.request.Request(PB_URL + path, headers={"Authorization": _pb_auth()})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        die(f"PB 查询失败: {path} → HTTP {e.code}: {detail}")
+    except Exception as e:
+        die(f"PB 查询失败: {path}: {e}")
+
+def _pb_urlenc(s):
+    return urllib.parse.quote(s, safe="")
+
+# SQL 占位符 ? 绑定（按出现顺序替换进 SQL 片段，字符串加引号）
+def _sql_bind(sql, args):
+    out, ai = [], 0
+    i = 0
+    while i < len(sql):
+        if sql[i] == "?":
+            if ai >= len(args): die("q() 翻译失败：占位符数量与参数不匹配")
+            v = args[ai]; ai += 1
+            if isinstance(v, str):
+                out.append("'" + v.replace("'", "''") + "'")
+            else:
+                out.append(str(v))
+            i += 1
+        elif sql[i] == "'":
+            j = sql.find("'", i + 1)
+            if j < 0: die("q() 翻译失败：SQL 字符串引号不闭合")
+            out.append(sql[i:j + 1]); i = j + 1
+        else:
+            out.append(sql[i]); i += 1
+    return "".join(out), args[ai:]
+
+def _like_to_fuzzy(pat):
+    # SQL LIKE 通配 → PB ~ 模糊（PB 的 ~ 原生支持 % 通配，仅做引号规整）
+    pat = pat.strip()
+    if pat.startswith("'%") and pat.endswith("%'"):
+        pat = pat[2:-2]
+    elif pat.startswith("'%") and pat.endswith("'"):
+        pat = pat[2:-1] + "%"
+    elif pat.startswith("'") and pat.endswith("%'"):
+        pat = "%'" + pat[1:-2]
+    return pat
+
+def _fetch_records(table, filter_, sort, per_page, fields, expand=None):
+    qs = ["perPage=" + str(per_page)]
+    if filter_: qs.append("filter=" + _pb_urlenc(filter_))
+    if sort: qs.append("sort=" + _pb_urlenc(sort))
+    if fields: qs.append("fields=" + _pb_urlenc(fields))
+    if expand: qs.append("expand=" + expand)
+    r = _pb_api(f"/api/collections/{table}/records?" + "&".join(qs))
+    return r.get("items", []), r.get("totalItems", 0)
+
+def _strip_select(sql):
+    u = sql.upper().lstrip()
+    if not u.startswith("SELECT"): return None
+    # 只拆“纯列名列表”（无函数/无 AS/无 *），供 orders/plans 等窄投影使用
+    seg_end = sql.upper().find(" FROM ")
+    if seg_end < 0: return None
+    seg = sql[6:seg_end].strip()
+    if seg == "*": return "*"
+    if not all(p.strip().replace(".", "").replace("_", "").isalnum() for p in seg.split(",")):
+        return None
+    return seg
+
+def _translate_simple_select(sql, args):
+    """翻译单表无 JOIN 的 SELECT ... FROM <表> [WHERE <简单条件>] [ORDER BY <列> DESC] LIMIT n
+    成功返回 (rows, n)；失败返回 (None, 原因)。条件支持 AND/OR、=、LIKE、括号。
+    列名映射：tasks.id → oldId（PB 中旧数字 id 存于 oldId 字段）。"""
+    s, rest = _sql_bind(sql, args)
+    sel = _strip_select(s)
+    if sel is None: return None, "含函数/别名/JOOIN 的 SELECT 不在翻译白名单"
+    import re
+    m = re.match(r"\s*FROM\s+([A-Za-z_][A-Za-z_0-9]*)\s*(.*)$", s[s.find(" FROM "):], re.I)
+    if not m: return None, "FROM 子句解析失败"
+    table, tail = m.group(1), m.group(2).strip()
+    TABLES = {"tasks": "tasks", "orders": "orders", "directPlans": "directPlans",
+              "satellites": "satellites", "companies": "companies", "candidates": "candidates",
+              "rankings": "rankings", "taskPool": "taskPool", "fulfillmentLog": "fulfillmentLog"}
+    if table not in TABLES: return None, f"表 {table} 不在白名单"
+    filter_, sort, limit, fields = "", "", 30, None
+    if sel != "*":
+        cols = [c.strip().split(".")[-1] for c in sel.split(",")]
+        fields = ",".join("oldId,id" if c == "id" else c for c in cols)
+    om_direct = re.match(r"ORDER\s+BY\s+([A-Za-z_.]+)(\s+(DESC|ASC))?(\s+LIMIT\s+(\d+))?\s*$", tail, re.I)
+    wm = re.match(r"WHERE\s+(.*?)\s*(ORDER\s+BY\s+.*)?$", tail, re.I | re.S) if not om_direct else None
+    conds = None
+    if om_direct:
+        col = om_direct.group(1).split(".")[-1]
+        direction = "-" if (om_direct.group(3) or "ASC").upper() == "DESC" else ""
+        sort = (direction + ("oldId" if col == "id" else col))
+        limit = int(om_direct.group(5)) if om_direct.group(5) else 30
+    elif wm:
+        where, rest2 = wm.group(1), wm.group(2) or ""
+        om = re.match(r"ORDER\s+BY\s+([A-Za-z_.]+)(\s+(DESC|ASC))?(\s+LIMIT\s+(\d+))?\s*$", rest2, re.I)
+        lm = re.match(r"LIMIT\s+(\d+)\s*$", rest2)
+        if om:
+            col = om.group(1).split(".")[-1]
+            direction = "-" if (om.group(3) or "ASC").upper() == "DESC" else ""
+            sort = (direction + ("oldId" if col == "id" else col))
+            limit = int(om.group(5)) if om.group(5) else 30
+        elif lm:
+            limit = int(lm.group(1))
+        elif rest2.strip():
+            return None, f"无法解析子句: {rest2!r}（支持 ORDER BY col [DESC] [LIMIT n] / LIMIT n）"
+        conds = where
+    elif tail:
+        lm2 = re.match(r"LIMIT\s+(\d+)\s*$", tail, re.I)
+        if lm2: limit = int(lm2.group(1))
+        else: return None, f"无法解析子句: {tail!r}"
+    if conds:
+        f = conds
+        f = re.sub(r"\bLIKE\b", "~", f, flags=re.I)
+        f = re.sub(r"\bAND\b", "&&", f, flags=re.I)
+        f = re.sub(r"\bOR\b", "||", f, flags=re.I)
+        # 列名映射：id → oldId；外键 taskId/candidateId → task.oldId/candidate.oldId
+        f = re.sub(r"\bid\s*=", "oldId =", f)
+        f = re.sub(r"\btaskId\s*=", "task.oldId =", f)
+        f = re.sub(r"\bcandidateId\s*=", "candidate.oldId =", f)
+        filter_ = f
+    items, _ = _fetch_records(TABLES[table], filter_, sort, limit, fields)
+    # 补回旧数字 id：fields 里映射后的 oldId 还原为 id
+    if fields:
+        rows = []
+        for it in items:
+            row = dict(it)
+            if "oldId" in row: row["id"] = row["oldId"]
+            rows.append(row)
+        return rows, ""
+    rows = []
+    for it in items:
+        row = dict(it)
+        if "oldId" in row: row["id"] = row["oldId"]
+        rows.append(row)
+    return rows, ""
+
+def _translate_satellites_query(sql, args):
+    """dispatch sats 的固定模式：多列 LIKE OR + decayed=0 + ORDER BY noradId LIMIT 50"""
+    s, rest = _sql_bind(sql, args)
+    import re
+    m = re.search(r"FROM\s+satellites\s+WHERE\s+(.*?)\s+ORDER\s+BY\s+noradId\s+LIMIT\s+(\d+)", s, re.I | re.S)
+    if not m: return None, "不符合 satellites 查询模式"
+    where, limit = m.group(1), int(m.group(2))
+    wm = re.match(r"\((.*)\)\s+AND\s+decayed\s*=\s*(\d+)", where, re.I | re.S)
+    if wm:
+        or_part, decayed = wm.group(1), wm.group(2)
+        parts = [p.strip() for p in re.split(r"\bOR\b", or_part, flags=re.I)]
+        conds = []
+        for p in parts:
+            pm = re.match(r"([A-Za-z_]+)\s+LIKE\s+'(.*)'$", p, re.I)
+            if not pm: return None, f"LIKE 条件解析失败: {p!r}"
+            conds.append(f"{pm.group(1)}~'{_like_to_fuzzy(pm.group(2))}'")
+        filter_ = f"({" || ".join(conds)}) && decayed={decayed}"
+    else:
+        dm = re.match(r"decayed\s*=\s*(\d+)$", where, re.I)
+        if not dm: return None, f"WHERE 不符合 (多列LIKE OR) AND decayed=0 或 decayed=0 模式: {where!r}"
+        filter_ = f"decayed={dm.group(1)}"
+    items, _ = _fetch_records("satellites", filter_, "noradId", limit, None)
+    rows = []
+    for it in items:
+        row = dict(it)
+        row["id"] = row.get("oldId")
+        rows.append(row)
+    return rows, ""
+
+def _translate_task_rankings(task_old_id):
+    """task 详情的 rankings JOIN 查询 → rankings+expand=candidate，拉回后按旧 SQL 形状拼行"""
+    items, _ = _fetch_records("rankings", f"task.oldId={task_old_id} && candidate.filtered=0", "rank", 15, None, expand="candidate")
+    rows = []
+    for r in items:
+        c = (r.get("expand") or {}).get("candidate") or {}
+        rows.append({"rank": r.get("rank"), "satName": c.get("satName"), "company": c.get("company"),
+                     "overpassTime": c.get("overpassTime"), "slewDeg": c.get("slewDeg"),
+                     "availability": c.get("availability"), "cloudFc": c.get("cloudFc"),
+                     "S": r.get("S"), "Q": r.get("Q"), "R": r.get("R"), "C": r.get("C")})
+    return rows
+
+def _pb_query(sql, args):
+    import re
+    u = re.sub(r"\s+", " ", sql).strip()
+    # 1) JOIN 类：task 详情 rankings（唯一 JOIN 模式）
+    if re.search(r"FROM\s+rankings\s+r\s+JOIN\s+candidates", u, re.I):
+        m = re.search(r"r\.taskId\s*=\s*\?", u)
+        if m and args:
+            return _translate_task_rankings(int(args[0]))
+        return die("q() 翻译失败：rankings JOIN 缺 taskId 绑定参数。"
+                   f"等价 PB 查询：GET {PB_URL}/api/collections/rankings/records"
+                   "?filter=task.oldId=<taskId> && candidate.filtered=0&expand=candidate&sort=rank")
+    # 2) satellites 多列 LIKE 模式
+    if re.search(r"FROM\s+satellites\b", u, re.I):
+        rows, why = _translate_satellites_query(u, args)
+        if rows is None:
+            die("q() 无法翻译该 SQL（LIKE 组合模式不在白名单）：" + why +
+                f"\n等价 PB 查询：GET {PB_URL}/api/collections/satellites/records"
+                "?filter=(name~'%关键词%' || country~'%关键词%' || ...) && decayed=0&sort=noradId&perPage=50")
+        return rows
+    # 3) 单表简单 SELECT
+    rows, why = _translate_simple_select(u, args)
+    if rows is not None:
+        return rows
+    die("q() 无法翻译该 SQL 到 PocketBase（_sql 端点已随 PB 迁移移除）：" + (why or "") +
+        "\n支持的 pattern：SELECT <列|*> FROM tasks|orders|directPlans|satellites|companies|candidates|rankings|taskPool"
+        " [WHERE 简单条件(AND/OR/=/LIKE)] [ORDER BY col [DESC] [LIMIT n]]"
+        f"\n等价 PB 查询：GET {PB_URL}/api/collections/<表>/records?filter=<PB filter>&sort=-oldId&perPage=N"
+        "（filter 语法：字段=值、&&、||、~模糊（支持%通配）、relation 用 task.oldId=<旧数字id>）")
 
 def self_update():
     """从应用拉最新 CLI 覆盖自身（旧副本自愈）"""
@@ -141,13 +367,18 @@ def main():
         })
 
     elif cmd == "sats":
-        kw = f"%{arg}%" if arg else "%"
-        rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
-                     resolution, altitude, inclination, period, decayed
-                     FROM satellites WHERE (name LIKE ? OR country LIKE ? OR operator LIKE ?
-                     OR category LIKE ? OR payloadType LIKE ?) AND decayed=0
-                     ORDER BY noradId LIMIT 50""",
-                 (kw, kw, kw, kw, kw))
+        kw = f"%{arg}%" if arg else None
+        if kw:
+            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                         resolution, altitude, inclination, period, decayed
+                         FROM satellites WHERE (name LIKE ? OR country LIKE ? OR operator LIKE ?
+                         OR category LIKE ? OR payloadType LIKE ?) AND decayed=0
+                         ORDER BY noradId LIMIT 50""",
+                     (kw, kw, kw, kw, kw))
+        else:
+            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                         resolution, altitude, inclination, period, decayed
+                         FROM satellites WHERE decayed=0 ORDER BY noradId LIMIT 50""")
         out({"总数": len(rows), "卫星": rows if arg else rows[:20],
              "提示": "传关键词缩小范围，如 dispatch sats 高分 / sats sar"})
 
