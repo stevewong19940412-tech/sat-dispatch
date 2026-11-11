@@ -322,8 +322,12 @@ dispatchApi.delete("/tasks/:id", async (req, res) => {
   if (ref) {
     // 级联清理：candidates / rankings / orders / directPlans 四处关联记录先查后删
     for (const table of ["candidates", "rankings", "orders", "directPlans"]) {
-      const rel = await pbAll(table, { filter: `task='${ref.rid}'`, fields: "id" });
-      for (const rec of rel) await pbDelete(table, rec.id);
+      try {
+        const rel = await pbAll(table, { filter: `task='${ref.rid}'`, fields: "id" });
+        for (const rec of rel) await pbDelete(table, rec.id);
+      } catch (e) {
+        console.error(`[delete] 级联清理 ${table} 失败: ${e.message.slice(0, 120)}`);
+      }
     }
     await pbDelete("tasks", ref.rid);
   }

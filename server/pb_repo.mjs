@@ -60,7 +60,7 @@ export function pbCacheIds(table, pairs) { // 批量预热：[[oldId, recordId],
 }
 
 // ── 通用 CRUD ──────────────────────────────────────────────────────────────
-export async function pbList(table, { filter, sort = "-oldId", limit = 100, page = 1, expand, fields } = {}) {
+export async function pbList(table, { filter, sort = "", limit = 100, page = 1, expand, fields } = {}) {
   const q = new URLSearchParams();
   if (filter) q.set("filter", filter);
   if (sort) q.set("sort", sort);
