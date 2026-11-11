@@ -1,11 +1,11 @@
 FROM registry.cn-beijing.aliyuncs.com/bladeai/blade-sandbox:v0.0.33
 WORKDIR /app
+COPY server/vendor_node_modules/ node_modules/
 COPY server/ server/
 COPY client/dist/ client/dist/
 COPY data/satplanning.db data/seed-satplanning.db
 COPY server/pocketbase /usr/local/bin/pocketbase
 RUN chmod +x /usr/local/bin/pocketbase
-COPY vendor_node_modules/ node_modules/
 ENV PORT=8800
 ENV PB_URL=http://127.0.0.1:8091
 ENV PB_ADMIN=admin@sat.local
