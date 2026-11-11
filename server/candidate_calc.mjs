@@ -179,7 +179,7 @@ export function computeVisibleWindows(sat, strip, opts) {
       const fineEnd = new Date(tcaRef + 60000).getTime();
       const satrec = makeSatrec(sat);
       let s = null, e = null;
-      for (let t = fineStart; t <= fineEnd; t += 1000) {
+      for (let t = fineStart; t <= fineEnd; t += 500) {
         const d = new Date(t);
         try {
           const pv = satellite.propagate(satrec, d);
