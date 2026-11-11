@@ -319,6 +319,27 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
 
 // 数据重置（工程侧管理端点）：清空全部业务流水（订单/方案/候选/排序/池/日志/履约），保留卫星/公司基础表
 // 数据重置（工程侧管理端点）：清空全部业务流水（订单/方案/候选/排序/池/日志/履约），保留卫星/公司基础表
+dispatchApi.post("/_pb-setup", async (req, res) => {
+  try {
+    const { runSetup } = await import('./pb_setup.mjs');
+    const r = await runSetup();
+    res.json({ ok: true, summary: r.summary });
+  } catch (e) { res.status(500).json({ error: e.message.slice(0, 300) }); }
+});
+dispatchApi.get("/_pb-schema", async (req, res) => {
+  try {
+    const PB = process.env.PB_URL || 'http://127.0.0.1:8091';
+    const auth = await fetch(PB + '/api/collections/_superusers/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: process.env.PB_ADMIN || 'admin@sat.local', password: process.env.PB_PASS || 'SatDispatch2026!' }) }).then(r => r.json());
+    const cols = await fetch(PB + '/api/collections', { headers: { Authorization: auth.token } }).then(r => r.json());
+    const arr = cols.items || cols;
+    const out = {};
+    for (const name of ['tasks', 'candidates', 'rankings', 'orders', 'directPlans', 'counters']) {
+      const c = arr.find(x => x.name === name);
+      out[name] = c ? c.fields.map(f => f.name + ':' + f.type).join(',') : 'MISSING';
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message.slice(0, 200) }); }
+});
 dispatchApi.get("/_pb-schema", async (req, res) => {
   try {
     const PB = process.env.PB_URL || 'http://127.0.0.1:8091';
