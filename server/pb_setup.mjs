@@ -146,6 +146,9 @@ export async function runSetup() {
   // 开 batch
   await api("/api/settings", "PATCH", { batch: { enabled: true, maxRequests: 500, timeout: 120 } }).catch(() => null);
   // 清 migrations 快照（防按字母序重放断链）——容器内 PB data 目录
+  // 首迁标记：PB 已完成过一次数据迁移就不再从 seed SQLite 灌数据（否则清空后的数据会被回填）
+  const doneFlag = await api(`/api/collections/counters/records?filter=${encodeURIComponent("name='migration_done'")}`).catch(() => null);
+  const migrated = doneFlag?.items?.[0]?.value === 1;
   const sqlite = new Database(SQLITE_PATH, { readonly: true });
   const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(r => r.name);
   const order = ["tasks", "candidates", "rankings", "orders", "directPlans", "companies", "fulfillmentLog", "taskPool", "dispatchLog", "missions", "static_layers", "satellites"];
@@ -157,13 +160,22 @@ export async function runSetup() {
       const cols = sqlite.prepare(`PRAGMA table_info(${name})`).all();
       const rels = REL_FIELD_MAP[name] || [];
       await ensureCollection(name, cols, rels, sqlite);
-      const r = await migrateTable(name, cols, rels, sqlite);
+      const r = migrated ? { src: 0, dst: -1 } : await migrateTable(name, cols, rels, sqlite);
       summary.push(`${name}:${r.dst}/${r.src}`);
-      if (r.dst < r.src) allOk = false;
+      if (!migrated && r.dst < r.src) allOk = false;
     } catch (e) {
       console.error(`[pb_setup] [${name}] 失败: ${e.stack ? e.stack.slice(0, 400) : e.message}`);
       allOk = false;
     }
+  }
+  if (!migrated) {
+    // 写首迁标记
+    const flag = await api(`/api/collections/counters/records?filter=${encodeURIComponent("name='migration_done'")}`).catch(() => null);
+    if (flag?.items?.[0]) await api(`/api/collections/counters/records/${flag.items[0].id}`, "PATCH", { value: 1 });
+    else await api("/api/collections/counters/records", "POST", { name: "migration_done", value: 1 });
+    console.log("[pb_setup] 首迁完成，已写标记");
+  } else {
+    console.log("[pb_setup] 已迁移过（migration_done=1），跳过数据灌入");
   }
   console.log(`[pb_setup] 完成 (${((Date.now()-t0)/1000).toFixed(1)}s): ${summary.join(' ')}`);
   return { ok: allOk, summary };
