@@ -807,7 +807,8 @@ dispatchApi.post("/plans/:id/confirm", (req, res) => {
   // 上注前强制核验（遥控作业规范：上行前阶段必须逐项确认）：
   // 1) 时窗正确 2) 指向对准（TCA） 3) 指令校验通过 4) 卫星/弧段正确
   if (stage === '上注') {
-    if (!['待核验下发'].includes(plan.status)) return res.status(400).json({ error: `状态 ${plan.status} 不可上注（须先生成指令并核验）` });
+    // 待核验下发（未单独确认方案）与方案已确认（已走②）均可直接上注——否则先确认方案后会死锁在中间态
+    if (!['待核验下发', '方案已确认'].includes(plan.status)) return res.status(400).json({ error: `状态 ${plan.status} 不可上注（须先生成指令并核验）` });
     const required = ['windowOk', 'tcaAligned', 'commandsValid', 'satArcOk'];
     const missing = required.filter(k => !checklist?.[k]);
     if (missing.length) return res.status(400).json({ error: `上注核验未完成，缺项: ${missing.join(', ')}`, required });

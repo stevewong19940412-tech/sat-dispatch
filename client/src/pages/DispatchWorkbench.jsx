@@ -26,6 +26,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   // 派给公司方式选择弹窗（指定第一公司/全候选竞价/挂池抢单）
   const [assignMode, setAssignMode] = useState(null);
   const [uplinkChecklist, setUplinkChecklist] = useState({});
+  // 上注确认弹窗内的错误提示（弹窗遮罩 z-index 200 盖住页面级 msg 条，错误必须就地展示）
+  const [uplinkErr, setUplinkErr] = useState(null);
   // 直控参数包查看抽屉（解算通过后即可查看完整参数包，不等上注核验）
   const [packDrawerId, setPackDrawerId] = useState(null);
 
@@ -221,7 +223,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
         {tab === 'tasks' && <TasksTab tasks={tasks} selected={selected} openTask={openTask}
           runCandidates={runCandidates} doDispatch={doDispatch} busy={busy} advanceOrder={advanceOrder} deleteTask={deleteTask} onRequestDelete={(t) => setDeleteConfirm(t)} setAssignMode={setAssignMode} setMsg={setMsg} setTab={setTab} load={load} planAction={planAction} />}
         {tab === 'orders' && <OrdersTab orders={orders} advanceOrder={advanceOrder} />}
-        {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} setPackDrawerId={setPackDrawerId} />}
+        {tab === 'plans' && <PlansTab plans={plans} planAction={planAction} busy={busy} setUplinkVerify={setUplinkVerify} setPackDrawerId={setPackDrawerId} setUplinkErr={setUplinkErr} />}
         {tab === 'plans' && <PlanPackDrawer plan={plans.find(x => x.id === packDrawerId)} onClose={() => setPackDrawerId(null)} />}
         {tab === 'pool' && <PoolTab pool={pool} companies={companies} claimTask={claimTask} />}
         {tab === 'companies' && <CompaniesTab companies={companies} />}
@@ -353,7 +355,8 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                       </label>
                     );
                   })}
-                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14, alignItems: 'center' }}>
+                    {uplinkErr && <span style={{ fontSize: 11.5, color: 'var(--danger)', marginRight: 'auto' }}>❌ {uplinkErr}</span>}
                     <button className="btn secondary" onClick={() => { setUplinkVerify(null); setUplinkChecklist({}); }}>取消</button>
                     <button className="btn danger" disabled={!['windowOk', 'tcaAligned', 'commandsValid', 'satArcOk'].every(k => uplinkChecklist[k])}
                       onClick={async () => {
@@ -362,7 +365,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
                           setMsg({ ok: true, text: '上注完成，卫星进入直控执行' });
                           setUplinkVerify(null); setUplinkChecklist({});
                           await load();
-                        } catch (e) { setMsg({ ok: false, text: e.message }); }
+                        } catch (e) { setUplinkErr(e.message); }
                       }}>确认下发上注</button>
                   </div>
                 </>);
@@ -627,7 +630,7 @@ function OrdersTab({ orders, advanceOrder }) {
 }
 
 // ─── 应急直控 Tab ─────────────────────────────────────────────────────────
-function PlansTab({ plans, planAction, busy, setUplinkVerify, setPackDrawerId }) {
+function PlansTab({ plans, planAction, busy, setUplinkVerify, setPackDrawerId, setUplinkErr }) {
   return (
     <div>
       {plans.length === 0 && <div style={{ textAlign: 'center', color: 'var(--text-dim)', padding: 30 }}>暂无直控方案（应急任务分流后自动生成）</div>}
@@ -728,7 +731,7 @@ function PlansTab({ plans, planAction, busy, setUplinkVerify, setPackDrawerId })
             {p.status === '待核验下发' && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, '方案')}>② 方案确认（值班）</button>}
             {['待核验下发', '方案已确认'].includes(p.status) && p.paramPack && <button className="btn secondary" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => setPackDrawerId(p.id)} data-action="view-pack" data-plan-id={p.id}>📄 查看直控参数包</button>}
             {p.status === '方案已确认' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }}
-              onClick={() => setUplinkVerify(p)}>③ 核验并确认上注</button>}
+              onClick={() => { setUplinkErr(null); setUplinkVerify(p); }}>③ 核验并确认上注</button>}
             {p.status === '执行中' && <button className="btn" disabled={busy} style={{ padding: '3px 12px', fontSize: 11.5 }} onClick={() => planAction(p.id, 'complete')}>④ 执行完成回写</button>}
           </div>
         </div>
