@@ -227,7 +227,7 @@ dispatchApi.get("/latest", (req, res) => {
 });
 
 dispatchApi.get("/tasks", (req, res) => {
-  const { status, limit = 100 } = req.query;
+  const { status, limit = 500 } = req.query;
   const rows = status
     ? db.prepare("SELECT * FROM tasks WHERE status=? ORDER BY id DESC LIMIT ?").all(status, +limit)
     : db.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT ?").all(+limit);

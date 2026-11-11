@@ -86,8 +86,9 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
     // 轮询节流：弹窗打开或鼠标悬停在可点击元素上时跳过本轮刷新，
     // 防止 15s 轮询重渲染与用户点击竞争（点击被吞/按钮 ref 失效——AI 面板打不开的根因）
     const t = setInterval(() => {
-      const interacting = document.querySelector('.modal-overlay') ||
-        document.querySelector('button:hover') || document.querySelector('div[style*="cursor: pointer"]:hover');
+      // 只在弹窗打开时跳过刷新（防打断填表）；hover 不再跳过——曾导致用户盯着列表
+      // 时批量任务进库后永远不刷新，被当成「没进库」
+      const interacting = document.querySelector('.modal-overlay');
       if (!interacting) load();
     }, 30000);
     return () => clearInterval(t);
