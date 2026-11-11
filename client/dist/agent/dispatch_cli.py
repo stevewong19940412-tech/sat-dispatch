@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """遥感卫星统一调度系统业务 CLI（智能体通道）
 智能体通过 Bash 直接调用：dispatch <子命令> [参数]
-数据来源：调度系统 API（127.0.0.1 内部）与 SQLite 库
+数据来源：调度系统 API（127.0.0.1 内部）与 PocketBase 实例
 """
-import json, os, sqlite3, sys, urllib.request
+import json, os, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 3  # v3: 自动地址探测+weather/recommend/delete（v1=写死地址 v2=基础命令）
+CLI_VERSION = 7  # v7: q() 从 POST /_sql(SQL直查) 重写为 PocketBase REST(filter翻译)，_sql 已随 PB 迁移弃用（v6=批量建单 v4=补齐 sats/companies+--help v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -77,8 +77,234 @@ def api_req(path, method="GET", body=None):
         die(f"API 调用失败: {e}")
 
 def q(sql, args=()):
-    # 便捷查询统一走 API（CLI 不直接连库，保持部署解耦）
-    return api_req("/_sql", "POST", {"sql": sql, "args": list(args)})
+    # 便捷查询：SQL 已随 PocketBase 迁移弃用（POST /_sql 移除）。
+    # 保持签名兼容，内部把已知简单查询模式翻译成 PB REST（filter/sort/perPage），
+    # 翻译不了的 SQL 报错并给出等价 PB 查询建议。
+    return _pb_query(sql, list(args))
+
+# ─── PocketBase 直查通道（v7）───────────────────────────────────────────────
+PB_URL = os.environ.get("DISPATCH_PB_URL", "http://127.0.0.1:8091")
+PB_ADMIN = os.environ.get("DISPATCH_PB_ADMIN", "admin@sat.local")
+PB_PASS = os.environ.get("DISPATCH_PB_PASS", "SatDispatch2026!")
+_pb_token = None
+
+def _pb_auth():
+    global _pb_token
+    if _pb_token: return _pb_token
+    body = json.dumps({"identity": PB_ADMIN, "password": PB_PASS}).encode()
+    req = urllib.request.Request(PB_URL + "/api/collections/_superusers/auth-with-password",
+                                 data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        _pb_token = json.loads(r.read().decode())["token"]
+    return _pb_token
+
+def _pb_api(path):
+    req = urllib.request.Request(PB_URL + path, headers={"Authorization": _pb_auth()})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        die(f"PB 查询失败: {path} → HTTP {e.code}: {detail}")
+    except Exception as e:
+        die(f"PB 查询失败: {path}: {e}")
+
+def _pb_urlenc(s):
+    return urllib.parse.quote(s, safe="")
+
+# SQL 占位符 ? 绑定（按出现顺序替换进 SQL 片段，字符串加引号）
+def _sql_bind(sql, args):
+    out, ai = [], 0
+    i = 0
+    while i < len(sql):
+        if sql[i] == "?":
+            if ai >= len(args): die("q() 翻译失败：占位符数量与参数不匹配")
+            v = args[ai]; ai += 1
+            if isinstance(v, str):
+                out.append("'" + v.replace("'", "''") + "'")
+            else:
+                out.append(str(v))
+            i += 1
+        elif sql[i] == "'":
+            j = sql.find("'", i + 1)
+            if j < 0: die("q() 翻译失败：SQL 字符串引号不闭合")
+            out.append(sql[i:j + 1]); i = j + 1
+        else:
+            out.append(sql[i]); i += 1
+    return "".join(out), args[ai:]
+
+def _like_to_fuzzy(pat):
+    # SQL LIKE 通配 → PB ~ 模糊（PB 的 ~ 原生支持 % 通配，仅做引号规整）
+    pat = pat.strip()
+    if pat.startswith("'%") and pat.endswith("%'"):
+        pat = pat[2:-2]
+    elif pat.startswith("'%") and pat.endswith("'"):
+        pat = pat[2:-1] + "%"
+    elif pat.startswith("'") and pat.endswith("%'"):
+        pat = "%'" + pat[1:-2]
+    return pat
+
+def _fetch_records(table, filter_, sort, per_page, fields, expand=None):
+    qs = ["perPage=" + str(per_page)]
+    if filter_: qs.append("filter=" + _pb_urlenc(filter_))
+    if sort: qs.append("sort=" + _pb_urlenc(sort))
+    if fields: qs.append("fields=" + _pb_urlenc(fields))
+    if expand: qs.append("expand=" + expand)
+    r = _pb_api(f"/api/collections/{table}/records?" + "&".join(qs))
+    return r.get("items", []), r.get("totalItems", 0)
+
+def _strip_select(sql):
+    u = sql.upper().lstrip()
+    if not u.startswith("SELECT"): return None
+    # 只拆“纯列名列表”（无函数/无 AS/无 *），供 orders/plans 等窄投影使用
+    seg_end = sql.upper().find(" FROM ")
+    if seg_end < 0: return None
+    seg = sql[6:seg_end].strip()
+    if seg == "*": return "*"
+    if not all(p.strip().replace(".", "").replace("_", "").isalnum() for p in seg.split(",")):
+        return None
+    return seg
+
+def _translate_simple_select(sql, args):
+    """翻译单表无 JOIN 的 SELECT ... FROM <表> [WHERE <简单条件>] [ORDER BY <列> DESC] LIMIT n
+    成功返回 (rows, n)；失败返回 (None, 原因)。条件支持 AND/OR、=、LIKE、括号。
+    列名映射：tasks.id → oldId（PB 中旧数字 id 存于 oldId 字段）。"""
+    s, rest = _sql_bind(sql, args)
+    sel = _strip_select(s)
+    if sel is None: return None, "含函数/别名/JOOIN 的 SELECT 不在翻译白名单"
+    import re
+    m = re.match(r"\s*FROM\s+([A-Za-z_][A-Za-z_0-9]*)\s*(.*)$", s[s.find(" FROM "):], re.I)
+    if not m: return None, "FROM 子句解析失败"
+    table, tail = m.group(1), m.group(2).strip()
+    TABLES = {"tasks": "tasks", "orders": "orders", "directPlans": "directPlans",
+              "satellites": "satellites", "companies": "companies", "candidates": "candidates",
+              "rankings": "rankings", "taskPool": "taskPool", "fulfillmentLog": "fulfillmentLog"}
+    if table not in TABLES: return None, f"表 {table} 不在白名单"
+    filter_, sort, limit, fields = "", "", 30, None
+    if sel != "*":
+        cols = [c.strip().split(".")[-1] for c in sel.split(",")]
+        fields = ",".join("oldId,id" if c == "id" else c for c in cols)
+    om_direct = re.match(r"ORDER\s+BY\s+([A-Za-z_.]+)(\s+(DESC|ASC))?(\s+LIMIT\s+(\d+))?\s*$", tail, re.I)
+    wm = re.match(r"WHERE\s+(.*?)\s*(ORDER\s+BY\s+.*)?$", tail, re.I | re.S) if not om_direct else None
+    conds = None
+    if om_direct:
+        col = om_direct.group(1).split(".")[-1]
+        direction = "-" if (om_direct.group(3) or "ASC").upper() == "DESC" else ""
+        sort = (direction + ("oldId" if col == "id" else col))
+        limit = int(om_direct.group(5)) if om_direct.group(5) else 30
+    elif wm:
+        where, rest2 = wm.group(1), wm.group(2) or ""
+        om = re.match(r"ORDER\s+BY\s+([A-Za-z_.]+)(\s+(DESC|ASC))?(\s+LIMIT\s+(\d+))?\s*$", rest2, re.I)
+        lm = re.match(r"LIMIT\s+(\d+)\s*$", rest2)
+        if om:
+            col = om.group(1).split(".")[-1]
+            direction = "-" if (om.group(3) or "ASC").upper() == "DESC" else ""
+            sort = (direction + ("oldId" if col == "id" else col))
+            limit = int(om.group(5)) if om.group(5) else 30
+        elif lm:
+            limit = int(lm.group(1))
+        elif rest2.strip():
+            return None, f"无法解析子句: {rest2!r}（支持 ORDER BY col [DESC] [LIMIT n] / LIMIT n）"
+        conds = where
+    elif tail:
+        lm2 = re.match(r"LIMIT\s+(\d+)\s*$", tail, re.I)
+        if lm2: limit = int(lm2.group(1))
+        else: return None, f"无法解析子句: {tail!r}"
+    if conds:
+        f = conds
+        f = re.sub(r"\bLIKE\b", "~", f, flags=re.I)
+        f = re.sub(r"\bAND\b", "&&", f, flags=re.I)
+        f = re.sub(r"\bOR\b", "||", f, flags=re.I)
+        # 列名映射：id → oldId；外键 taskId/candidateId → task.oldId/candidate.oldId
+        f = re.sub(r"\bid\s*=", "oldId =", f)
+        f = re.sub(r"\btaskId\s*=", "task.oldId =", f)
+        f = re.sub(r"\bcandidateId\s*=", "candidate.oldId =", f)
+        filter_ = f
+    items, _ = _fetch_records(TABLES[table], filter_, sort, limit, fields)
+    # 补回旧数字 id：fields 里映射后的 oldId 还原为 id
+    if fields:
+        rows = []
+        for it in items:
+            row = dict(it)
+            if "oldId" in row: row["id"] = row["oldId"]
+            rows.append(row)
+        return rows, ""
+    rows = []
+    for it in items:
+        row = dict(it)
+        if "oldId" in row: row["id"] = row["oldId"]
+        rows.append(row)
+    return rows, ""
+
+def _translate_satellites_query(sql, args):
+    """dispatch sats 的固定模式：多列 LIKE OR + decayed=0 + ORDER BY noradId LIMIT 50"""
+    s, rest = _sql_bind(sql, args)
+    import re
+    m = re.search(r"FROM\s+satellites\s+WHERE\s+(.*?)\s+ORDER\s+BY\s+noradId\s+LIMIT\s+(\d+)", s, re.I | re.S)
+    if not m: return None, "不符合 satellites 查询模式"
+    where, limit = m.group(1), int(m.group(2))
+    wm = re.match(r"\((.*)\)\s+AND\s+decayed\s*=\s*(\d+)", where, re.I | re.S)
+    if wm:
+        or_part, decayed = wm.group(1), wm.group(2)
+        parts = [p.strip() for p in re.split(r"\bOR\b", or_part, flags=re.I)]
+        conds = []
+        for p in parts:
+            pm = re.match(r"([A-Za-z_]+)\s+LIKE\s+'(.*)'$", p, re.I)
+            if not pm: return None, f"LIKE 条件解析失败: {p!r}"
+            conds.append(f"{pm.group(1)}~'{_like_to_fuzzy(pm.group(2))}'")
+        filter_ = f"({" || ".join(conds)}) && decayed={decayed}"
+    else:
+        dm = re.match(r"decayed\s*=\s*(\d+)$", where, re.I)
+        if not dm: return None, f"WHERE 不符合 (多列LIKE OR) AND decayed=0 或 decayed=0 模式: {where!r}"
+        filter_ = f"decayed={dm.group(1)}"
+    items, _ = _fetch_records("satellites", filter_, "noradId", limit, None)
+    rows = []
+    for it in items:
+        row = dict(it)
+        row["id"] = row.get("oldId")
+        rows.append(row)
+    return rows, ""
+
+def _translate_task_rankings(task_old_id):
+    """task 详情的 rankings JOIN 查询 → rankings+expand=candidate，拉回后按旧 SQL 形状拼行"""
+    items, _ = _fetch_records("rankings", f"task.oldId={task_old_id} && candidate.filtered=0", "rank", 15, None, expand="candidate")
+    rows = []
+    for r in items:
+        c = (r.get("expand") or {}).get("candidate") or {}
+        rows.append({"rank": r.get("rank"), "satName": c.get("satName"), "company": c.get("company"),
+                     "overpassTime": c.get("overpassTime"), "slewDeg": c.get("slewDeg"),
+                     "availability": c.get("availability"), "cloudFc": c.get("cloudFc"),
+                     "S": r.get("S"), "Q": r.get("Q"), "R": r.get("R"), "C": r.get("C")})
+    return rows
+
+def _pb_query(sql, args):
+    import re
+    u = re.sub(r"\s+", " ", sql).strip()
+    # 1) JOIN 类：task 详情 rankings（唯一 JOIN 模式）
+    if re.search(r"FROM\s+rankings\s+r\s+JOIN\s+candidates", u, re.I):
+        m = re.search(r"r\.taskId\s*=\s*\?", u)
+        if m and args:
+            return _translate_task_rankings(int(args[0]))
+        return die("q() 翻译失败：rankings JOIN 缺 taskId 绑定参数。"
+                   f"等价 PB 查询：GET {PB_URL}/api/collections/rankings/records"
+                   "?filter=task.oldId=<taskId> && candidate.filtered=0&expand=candidate&sort=rank")
+    # 2) satellites 多列 LIKE 模式
+    if re.search(r"FROM\s+satellites\b", u, re.I):
+        rows, why = _translate_satellites_query(u, args)
+        if rows is None:
+            die("q() 无法翻译该 SQL（LIKE 组合模式不在白名单）：" + why +
+                f"\n等价 PB 查询：GET {PB_URL}/api/collections/satellites/records"
+                "?filter=(name~'%关键词%' || country~'%关键词%' || ...) && decayed=0&sort=noradId&perPage=50")
+        return rows
+    # 3) 单表简单 SELECT
+    rows, why = _translate_simple_select(u, args)
+    if rows is not None:
+        return rows
+    die("q() 无法翻译该 SQL 到 PocketBase（_sql 端点已随 PB 迁移移除）：" + (why or "") +
+        "\n支持的 pattern：SELECT <列|*> FROM tasks|orders|directPlans|satellites|companies|candidates|rankings|taskPool"
+        " [WHERE 简单条件(AND/OR/=/LIKE)] [ORDER BY col [DESC] [LIMIT n]]"
+        f"\n等价 PB 查询：GET {PB_URL}/api/collections/<表>/records?filter=<PB filter>&sort=-oldId&perPage=N"
+        "（filter 语法：字段=值、&&、||、~模糊（支持%通配）、relation 用 task.oldId=<旧数字id>）")
 
 def self_update():
     """从应用拉最新 CLI 覆盖自身（旧副本自愈）"""
@@ -112,6 +338,8 @@ def main():
         cmd = "help"
     else:
         cmd = sys.argv[1]
+    if cmd in ("--help", "-h", "-?"):
+        cmd = "help"
     arg = sys.argv[2] if len(sys.argv) > 2 else None
 
     if cmd == "help":
@@ -121,19 +349,38 @@ def main():
             "commands": {
                 "tasks": "列出最近任务",
                 "task <id>": "任务详情（排序清单/订单/直控方案）",
+                "pool": "查看任务池（挂起待认领的任务）",
                 "create '<JSON>'": "创建任务单。字段: taskName,targetName,lat,lon,obsType(optical/sar),resolution(米),windowStart,windowEnd(ISO),maxCloud(0-1),timelinessHours,priority(常规/重点/应急)。必填缺失时返回 needClarify",
                 "candidates <taskId>": "候选卫星计算（可见窗/约束/云量/排序，耗时较长）",
                 "order-intake <json>": "一站式下单（推荐）：传任务JSON，服务端原子完成建单+确认+候选+回读断言",
         "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
-                "sats [关键词]": "查卫星资源",
+                "sats [关键词]": "查卫星资源（按名称/类别/国家/运营商模糊匹配，如 sats 高分）",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
         "delete <taskId>": "删除任务单（仅待派单/挂任务池状态；级联清理候选排序订单）",
         'weather <lat> <lon> [天数=3]': "查目标点逐小时云量+最佳成像窗口建议（open-meteo真实预报，72h内）",
         "recommend '<JSON>'": "卫星类型智能推荐（用户未指定光学/SAR时调用），返回推荐类型+理由，交用户确认后再 create",
-                "plans": "直控方案列表",
+                "preflight '<JSON>'": "下单前预检（秒级，不写库）：时窗跨度/光照可行性/云量源边界/geom格式——批量或长窗下单前先跑它",
+                "batch-create '<JSON数组或@文件>' [确认=0|1]": "批量建单（工程侧刚性入口）：单事务原子落库，返回逐条成功(taskId/taskNo)/失败(errors)——只有这里的 created 才算数，AI 文本输出不算",
             },
+            "hint": "dispatch --help 与 dispatch help 等效；子命令必须小写精确匹配",
         })
+
+    elif cmd == "sats":
+        kw = f"%{arg}%" if arg else None
+        if kw:
+            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                         resolution, altitude, inclination, period, decayed
+                         FROM satellites WHERE (name LIKE ? OR country LIKE ? OR operator LIKE ?
+                         OR category LIKE ? OR payloadType LIKE ?) AND decayed=0
+                         ORDER BY noradId LIMIT 50""",
+                     (kw, kw, kw, kw, kw))
+        else:
+            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                         resolution, altitude, inclination, period, decayed
+                         FROM satellites WHERE decayed=0 ORDER BY noradId LIMIT 50""")
+        out({"总数": len(rows), "卫星": rows if arg else rows[:20],
+             "提示": "传关键词缩小范围，如 dispatch sats 高分 / sats sar"})
 
     elif cmd == "tasks":
         out(q("SELECT id, taskNo, taskName, targetName, obsType, resolution, priority, status, windowStart, windowEnd FROM tasks ORDER BY id DESC LIMIT 30"))
@@ -202,6 +449,42 @@ def main():
         elif r.get("reused"):
             print(f"\n↩ 同目标任务已存在：{r['taskNo']}（状态 {r['status']}），未重复建单。")
         sys.exit(0)
+    elif cmd == "batch-create" and arg:
+        # 批量建单（工程侧刚性入口）：接任务 JSON 数组文件或内联 JSON，单事务原子落库。
+        # 「AI 说生成了 N 个任务」不算数——本命令的 created 数组才是事实。
+        # 用法: dispatch batch-create '<JSON数组或@文件路径>' [确认下发=0|1]
+        import json as _json
+        raw = arg
+        if raw.startswith("@"):
+            try:
+                with open(raw[1:], encoding="utf-8") as f:
+                    raw = f.read()
+            except Exception as e:
+                die(f"读文件失败: {e}")
+        try:
+            arr = _json.loads(raw)
+        except Exception as e:
+            die(f"参数必须是任务 JSON 数组: {e}")
+        if isinstance(arr, dict): arr = [arr]
+        if not isinstance(arr, list) or not arr:
+            die("须为非空任务数组")
+        confirm = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
+        r = api_req("/tasks/batch", method="POST", body={"tasks": arr})
+        # 刚性回写：全部成功时按需逐个确认（pendingConfirm→已确认待派发）
+        confirmed = 0
+        if confirm and r.get("created"):
+            for c in r["created"]:
+                if c.get("pendingConfirm"):
+                    try:
+                        api_req(f"/tasks/{c['id']}/confirm", method="POST", body={})
+                        c["status"] = "已确认待派发"
+                        confirmed += 1
+                    except Exception as e:
+                        c["confirmError"] = str(e)
+        out({"ok": r.get("ok"), "requested": r.get("requested"), "createdCount": r.get("createdCount"),
+             "failedCount": r.get("failedCount"), "confirmedCount": confirmed if confirm else None,
+             "created": r.get("created"), "failed": r.get("failed")})
+
     elif cmd == "dispatch":
         die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
             "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
@@ -244,11 +527,88 @@ def main():
             res = json.loads(r.read().decode())
         out({"ok": True, "deleted": t.get("taskNo"), "级联清理": "candidates/rankings/orders/directPlans"})
 
+    elif cmd == "companies":
+        out(api_req("/companies"))
+
+    elif cmd == "pool":
+        out(api_req("/pool"))
+
     elif cmd == "orders":
         out(q("SELECT orderNo, taskId, channel, company, satName, status, price, fulfillment FROM orders ORDER BY id DESC LIMIT 30"))
 
     elif cmd == "plans":
         out(q("SELECT id, taskId, satName, company, status, overpassTime FROM directPlans ORDER BY id DESC LIMIT 20"))
+
+    elif cmd == "preflight" and arg:
+        # 下单前预检（固化历次撞墙经验，秒级返回，不写库）：
+        # ① geom/时窗/云量源合法性 ② 72h云量边界提示 ③ 光照可行性 ④ 宽窗诊断口径
+        try:
+            body = json.loads(arg)
+        except Exception:
+            die("用法: dispatch preflight '{\"lat\":23.5,\"lon\":120.9,\"obsType\":\"optical\",\"windowStart\":\"...\",\"windowEnd\":\"...\",\"maxCloud\":0.4}'")
+        checks, warns = [], []
+        lat, lon = body.get("lat"), body.get("lon")
+        ws, we = body.get("windowStart"), body.get("windowEnd")
+        obs = body.get("obsType") or "optical"
+        max_cloud = body.get("maxCloud", 0.4)
+        # 1. 时窗跨度与长窗口径
+        from datetime import datetime, timezone as _tz
+        def _p(iso):
+            return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if not ws or not we:
+            checks.append({"item": "时间窗", "ok": False, "msg": "缺 windowStart/windowEnd"})
+        else:
+            try:
+                span_days = (_p(we) - _p(ws)).total_seconds() / 86400
+                if span_days <= 0:
+                    checks.append({"item": "时间窗", "ok": False, "msg": "起止倒置"})
+                else:
+                    checks.append({"item": "时间窗", "ok": True, "msg": f"跨度 {span_days:.1f} 天"})
+                    if span_days > 3:
+                        warns.append(f"长窗（{span_days:.0f}天）：候选云量中超过建单时刻 72h 的部分为模拟气象场（cloudSource=simulated），无物理意义；批量下单建议 maxCloud 放宽到 1，临期 72h 内复核真实云量再取舍")
+                    # 光照可行性：光学任务且时窗短（<1.5天）时，逐小时检查窗内是否有太阳高度角≥10°的时段
+                    if obs == "optical" and span_days <= 1.5:
+                        import math
+                        def sun_el(la, lo, dt):
+                            rad = math.pi/180
+                            d = (dt.timestamp() - 946728000) / 86400  # 自J2000
+                            L = (280.460 + 0.9856474*d) % 360
+                            g = ((357.528 + 0.9856003*d) % 360) * rad
+                            lam = (L + 1.915*math.sin(g) + 0.020*math.sin(2*g)) * rad
+                            decl = math.asin(math.sin(lam)*math.sin(23.439*rad))
+                            utc_h = dt.hour + dt.minute/60
+                            ha = (utc_h*15 - 180 + lo) * rad
+                            la_r = la*rad
+                            se = math.sin(la_r)*math.sin(decl) + math.cos(la_r)*math.cos(decl)*math.cos(ha)
+                            return math.asin(max(-1, min(1, se))) / rad
+                        good_h = 0
+                        t = _p(ws)
+                        while t < _p(we):
+                            if sun_el(lat or 0, lon or 0, t) >= 10: good_h += 1
+                            t = t.replace(microsecond=0)
+                            from datetime import timedelta
+                            t += timedelta(hours=1)
+                        checks.append({"item": "光照可行性", "ok": good_h > 0,
+                          "msg": f"窗内太阳高度角≥10°的小时数: {good_h}" + ("" if good_h else "——光学无解，改 SAR 或改白天窗")})
+            except Exception as e:
+                checks.append({"item": "时间窗", "ok": False, "msg": f"时间格式解析失败: {e}"})
+        # 2. 云量源边界提示
+        if max_cloud is not None and max_cloud < 1:
+            from datetime import timedelta
+            try:
+                lead = (_p(ws) - datetime.now(_tz.utc)).total_seconds() / 3600
+                if lead > 72:
+                    warns.append(f"时窗起点距现在 {lead:.0f}h，已超 open-meteo 72h 预报期：候选云量将全部是模拟场，maxCloud={max_cloud} 筛选无意义")
+            except Exception:
+                pass
+        # 3. geom 格式提醒（点任务走 create 自动转，面任务必须 coords）
+        if body.get("geomType") in ("area", "polygon") and body.get("coords") is None and lat is not None:
+            warns.append("面任务必须传 coords=[[lat,lon],...]（不是 GeoJSON）；传 GeoJSON 会静默 0 候选")
+        # 4. 宽窗诊断口径
+        if body.get("diagnose"):
+            warns.append("诊断任务口径：maxCloud=1 + 宽窗（≥3天）先验证链路（candidates>0 且 gapStats 非空），再筛真实窗口；gapStats 为空且 candidates=0 先怀疑 geom 格式")
+        out({"ok": all(c["ok"] for c in checks), "checks": checks, "warnings": warns,
+             "note": "预检不写库；正式下单走 create/order-intake"})
 
     else:
         die(f"未知命令 {cmd}，执行 dispatch help 查看用法")
