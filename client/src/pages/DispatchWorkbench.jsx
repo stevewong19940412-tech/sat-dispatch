@@ -240,6 +240,24 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
               <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 10 }}>
                 任务 {assignMode.taskNo}「{assignMode.taskName}」｜ 候选 {assignMode.rankings?.length ?? 0} 条
               </div>
+              {/* 初始规划预警：候选存在但 0 颗幅宽可覆盖 → 问题在规划不在解算，派单前亮出来 */}
+              {(() => {
+                const rs = assignMode.rankings ?? [];
+                const coverable = rs.filter(r => r.imgWinStart && r.imgWinEnd);
+                if (rs.length === 0 || coverable.length > 0) return null;
+                const best = rs.filter(r => r.minDistKm != null).sort((a,b) => a.minDistKm - b.minDistKm)[0];
+                return (
+                  <div style={{ fontSize: 11.5, marginBottom: 10, padding: '8px 12px', borderRadius: 4, background: 'rgba(244,82,94,0.08)', border: '1px solid rgba(244,82,94,0.35)' }}>
+                    <div style={{ fontWeight: 600, color: 'var(--danger)' }}>⚠ 初始规划预警：现有候选没有任何一颗星能拍到目标</div>
+                    <div style={{ color: 'var(--text-main)', marginTop: 3 }}>
+                      候选 {rs.length} 条的过顶弧段均罩不住目标（{best ? `最近 ${best.satName} 距离 ${Math.round(best.minDistKm*10)/10}km` : '无过顶数据'}），派出去也会在校验驳回。
+                    </div>
+                    <div style={{ color: 'var(--warn)', marginTop: 3 }}>
+                      建议先调整任务参数：扩大时间窗（≥3天）/ 改 SAR 或宽幅星 / 核对目标位置与分辨率要求，重算候选后再派。
+                    </div>
+                  </div>
+                );
+              })()}
               {[
                 { key: 'top1', title: '派给排名第一的公司', desc: `直接指派 ${assignMode.rankings?.[0]?.company ?? '—'}（${assignMode.rankings?.[0]?.satName ?? '—'}，优先级评分最高）`, act: 'top1' },
                 { key: 'inquiry', title: '向所有候选公司发起竞价', desc: `候选公司 ${new Set((assignMode.rankings ?? []).map(r => r.company)).size} 家，报价后人工定标`, act: 'inquiry' },

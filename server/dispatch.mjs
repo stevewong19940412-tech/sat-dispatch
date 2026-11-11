@@ -281,7 +281,49 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
 
   // 优先级计算（4.4）联动
   const ranked = rankTask(task.id);
-  res.json({ taskId: task.id, strips: strips.length, candidates: inserted, filtered, ranked, gapStats });
+
+  // ── 初始规划诊断（4.3.1）：所有候选都拍不到时，在建单/派单前就告诉用户「规划有问题」──
+  // 问题不在解算环节，而在上游：时窗/分辨率/目标口径定错了。这里归因并给可执行修正建议
+  const diagRows = db.prepare(`
+    SELECT c.satName, c.company, c.minDistKm, c.imgWinStart, c.imgWinEnd, c.validRes, c.slewDeg, c.filtered, c.filterReason
+    FROM candidates c WHERE c.taskId=? AND c.stripIdx=(SELECT MIN(stripIdx) FROM candidates WHERE taskId=?)`).all(task.id, task.id);
+  const passingRows = diagRows.filter(r => r.filtered === 0);
+  const coverableRows = passingRows.filter(r => r.imgWinStart && r.imgWinEnd);
+  let planningDiagnosis = null;
+  if (passingRows.length > 0 && coverableRows.length === 0) {
+    // 排序非空但 0 颗幅宽可覆盖：全部候选都拍不到目标，问题在初始规划
+    const passed = diagRows.filter(r => r.imgWinStart && r.imgWinEnd && r.filtered === 1);
+    const best = [...passingRows].filter(r => r.minDistKm != null).sort((a, b) => a.minDistKm - b.minDistKm)[0];
+    const minDists = passingRows.filter(r => r.minDistKm != null).map(r => r.minDistKm);
+    const bestDist = minDists.length ? Math.min(...minDists) : null;
+    // 归因：若被筛掉的候选里有幅宽可覆盖的 → 是硬约束（分辨率/时效）把能拍的星筛掉了；
+    // 否则 → 时窗内所有可用星过顶都离目标太远（时窗错/目标位置错/需要更宽幅）
+    const filteredButCoverable = diagRows.filter(r => r.imgWinStart && r.imgWinEnd && r.filtered === 1);
+    const reasons = {};
+    for (const r of diagRows.filter(r => r.filtered === 1)) {
+      for (const part of (r.filterReason || '').split('；')) {
+        const k = part.split('：')[0];
+        if (k) reasons[k] = (reasons[k] ?? 0) + 1;
+      }
+    }
+    planningDiagnosis = {
+      level: 'PLANNING_FATAL',
+      summary: `候选排序 ${passingRows.length} 条中 0 颗卫星幅宽可覆盖目标——按当前任务参数，没有任何一颗星能拍到，问题在初始规划而非解算环节`,
+      attribution: filteredButCoverable.length > 0
+        ? `有 ${filteredButCoverable.length} 条候选幅宽可覆盖但被约束筛掉（${Object.entries(reasons).slice(0,3).map(([k,v])=>`${k}×${v}`).join('、')}）→ 约束条件定得太严，放宽即可拍到`
+        : bestDist != null
+          ? `时窗内过顶的卫星全部离目标太远（最近 ${Math.round(bestDist*10)/10}km，最小幅宽半宽 ~7km）→ 时窗选择错误或目标位置/口径有问题，放宽约束也拍不到`
+          : '时窗内无过顶窗口 → 时窗选错了（可能落在卫星重访间隙或夜间）',
+      bestCandidate: best ? { satName: best.satName, company: best.company, minDistKm: Math.round(best.minDistKm*10)/10, imgWinCovered: !!(best.imgWinStart && best.imgWinEnd) } : null,
+      suggestions: filteredButCoverable.length > 0
+        ? ['查看被筛候选的 filterReason（候选列表中被筛掉的行），针对性放宽分辨率/时效/云量上限', '或改用观测类型/分辨率档位更匹配的星座（如宽幅星）重新建单']
+        : bestDist != null && bestDist < 100
+          ? ['把时间窗扩大到 ±3 天重新计算候选（当前时窗内过顶几何不可行）', '或改派 SAR（SAR 幅宽更大且不受云量限制）', '或确认目标位置/面目标范围口径是否正确']
+          : ['扩大时间窗（建议 ≥3 天）重新计算候选', '确认目标位置是否正确——当前时窗内过顶几何上不可能拍到', '考虑降低分辨率要求改用宽幅星（幅宽 30km+）'],
+    };
+  }
+
+  res.json({ taskId: task.id, strips: strips.length, candidates: inserted, filtered, ranked, gapStats, planningDiagnosis });
 });
 
 // ─── 派单执行（4.5）──────────────────────────────────────────────────────
@@ -336,6 +378,22 @@ dispatchApi.post("/tasks/:id/dispatch", (req, res) => {
 
   if (channel === '直控') {
     // R1 应急 → 创建直控执行方案（待值班确认）
+    // 初始规划守门：0 颗候选幅宽可覆盖 → 拒建注定失败的方案，把问题挡在上游。
+    // forcePlanning=true 可人工强行建（明确知道拍不到仍要占轨，如占用过顶弧段做别的用途）
+    const coverable = ranking.filter(r => r.imgWinStart && r.imgWinEnd);
+    if (coverable.length === 0 && !req.body?.forcePlanning) {
+      const best = [...ranking].filter(r => r.minDistKm != null).sort((a, b) => a.minDistKm - b.minDistKm)[0];
+      return res.status(422).json({
+        error: `初始规划问题：候选排序 ${ranking.length} 条中 0 颗卫星幅宽可覆盖目标，直控方案必然校验驳回。` +
+          (best?.minDistKm != null
+            ? `最近候选 ${best.satName} 过顶距目标 ${Math.round(best.minDistKm)}km（远超幅宽半宽）。`
+            : '') +
+          ` 请扩大时间窗重新计算候选、改用 SAR/宽幅星，或确认目标位置与分辨率口径后再派单。` +
+          ` 如确要强行建单（明知拍不到仍占用弧段），传 forcePlanning=true。`,
+        planningFatal: true,
+        candidatesTotal: ranking.length,
+      });
+    }
     // top 候选优选"幅宽可覆盖"（imgWin 非空）的，排序分相同前提下拍到 > 拍不到
     const top = ranking.find(r => r.imgWinStart && r.imgWinEnd) ?? ranking[0];
     const r = db.prepare(`INSERT INTO directPlans (taskId,satNoradId,satName,company,windowStart,windowEnd,overpassTime,imgWinStart,imgWinEnd,minDistKm,status)
