@@ -326,6 +326,14 @@ dispatchApi.post("/_pb-setup", async (req, res) => {
     res.json({ ok: true, summary: r.summary });
   } catch (e) { res.status(500).json({ error: e.message.slice(0, 300) }); }
 });
+dispatchApi.get("/_pb-peek", async (req, res) => {
+  try {
+    const { table, oldId } = req.query;
+    if (!table || !oldId) return res.status(400).json({ error: 'table & oldId 必填' });
+    const r = await pbList(table, { filter: `oldId=${parseInt(oldId)}`, limit: 5, fields: 'id,oldId,taskNo,taskName,status' });
+    res.json(r.items);
+  } catch (e) { res.status(500).json({ error: e.message.slice(0, 200) }); }
+});
 dispatchApi.get("/_pb-schema", async (req, res) => {
   try {
     const PB = process.env.PB_URL || 'http://127.0.0.1:8091';
