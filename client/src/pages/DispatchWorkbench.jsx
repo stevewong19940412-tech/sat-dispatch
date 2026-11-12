@@ -110,7 +110,14 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   }, []);
 
   const openTask = async (id) => {
-    setSelected(await api(`/dispatch/tasks/${id}`));
+    try {
+      setSelected(await api(`/dispatch/tasks/${id}`));
+    } catch (e) {
+      // 任务不存在/已删（如缓存错位期的 404）不再抛未捕获 Promise——就地提示并刷新列表
+      setMsg({ ok: false, text: `任务 #${id} 打不开：${e.message}（列表已刷新）` });
+      setSelected(null);
+      await load();
+    }
   };
 
   const runCandidates = async (id) => {
