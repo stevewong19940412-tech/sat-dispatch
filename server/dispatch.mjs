@@ -47,8 +47,10 @@ refreshCompaniesCache().catch(() => {});
 // 兼容两种 id：纯数字=旧迁移 id（oldId 回查），字符串=PB record id（新任务直用）
 async function pbResolveTask(idParam) {
   const s = String(idParam ?? "");
+  if (process.env.PB_DEBUG_RESOLVE) console.log(`[resolve] idParam=${s}`);
   if (/^\d+$/.test(s)) {
     const rid = await pbRecordId("tasks", +s);
+    if (process.env.PB_DEBUG_RESOLVE) console.log(`[resolve] oldId=${s} → rid=${rid}`);
     return rid ? { rid, oldId: +s } : null;
   }
   return s ? { rid: s, oldId: null } : null;
