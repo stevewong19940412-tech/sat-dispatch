@@ -84,7 +84,22 @@ export async function pbAll(table, { filter, sort, expand, fields } = {}) {
 }
 export async function pbGet(table, recordId, { expand } = {}) {
   const q = expand ? `?expand=${expand}` : "";
-  return api(`/api/collections/${COL(table)}/records/${recordId}${q}`);
+  try {
+    return await api(`/api/collections/${COL(table)}/records/${recordId}${q}`);
+  } catch (e) {
+    // 陈旧缓存自愈：record id 404 时清掉该表的 id 映射缓存并重试一次
+    // （场景：记录删除重建后 PB record id 变化，_idCache 仍指向旧 id → 详情 404）
+    if (e.status === 404 && _idCache.get(table)?.size) {
+      const oldId = _revCache.get(table)?.get(recordId);
+      if (oldId != null) {
+        _idCache.get(table).delete(oldId);
+        _revCache.get(table).delete(recordId);
+        const fresh = await pbRecordId(table, oldId);
+        if (fresh && fresh !== recordId) return pbGet(table, fresh, { expand });
+      }
+    }
+    throw e;
+  }
 }
 export async function pbGetByOldId(table, oldId) {
   const rid = await pbRecordId(table, oldId);
@@ -97,6 +112,12 @@ export async function pbUpdate(table, recordId, data) {
   return api(`/api/collections/${COL(table)}/records/${recordId}`, "PATCH", data);
 }
 export async function pbDelete(table, recordId) {
+  // 删除时同步失效 id 映射缓存（防删除重建同 oldId 后缓存指向已删 record）
+  const oldId = _revCache.get(table)?.get(recordId);
+  if (oldId != null) {
+    _idCache.get(table)?.delete(oldId);
+    _revCache.get(table)?.delete(recordId);
+  }
   return api(`/api/collections/${COL(table)}/records/${recordId}`, "DELETE");
 }
 // 批量（PB batch；≤200/批），返回逐条结果
