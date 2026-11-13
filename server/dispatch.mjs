@@ -1,4 +1,6 @@
 // ─── 调度主服务：任务受理 → 候选计算 → 优先级 → 派单/直控 ────────────────
+import fs from "fs";
+import path from "path";
 import express from "express";
 import { db } from "./db.mjs";
 import {
@@ -272,7 +274,14 @@ dispatchApi.post("/tasks/batch", async (req, res) => {
 // AI 建单联动：最近 3 分钟内由 AI 创建的任务（供工作台自动打开）
 // CLI 版本对账（旧副本自愈：CLI 启动时对比，旧则提示 --self-update）
 dispatchApi.get("/cli-version", (req, res) => {
-  res.json({ version: 8 });
+  // 版本号从分发文件实时解析——单一事实源，杜绝"服务端版本号与分发副本不一致"
+  try {
+    const m = fs.readFileSync(path.join(process.cwd(), "client/dist/agent/dispatch_cli.py"), "utf8")
+      .match(/CLI_VERSION\s*=\s*(\d+)/);
+    res.json({ version: m ? +m[1] : 0 });
+  } catch {
+    res.json({ version: 0 });
+  }
 });
 
 dispatchApi.get("/latest", async (req, res) => {

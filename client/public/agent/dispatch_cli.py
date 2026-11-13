@@ -508,11 +508,9 @@ def main():
              "failedCount": r.get("failedCount"), "confirmedCount": confirmed if confirm else None,
              "created": r.get("created"), "failed": r.get("failed")})
 
-    elif cmd == "dispatch":
-        die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
-            "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
-        lat, lon = float(rest[0]), float(rest[1])
-        days = int(rest[2]) if len(rest) > 2 else 3
+    elif cmd == "weather" and len(sys.argv) >= 4:
+        lat, lon = float(sys.argv[2]), float(sys.argv[3])
+        days = int(sys.argv[4]) if len(sys.argv) > 4 else 3
         days = max(1, min(days, 3))  # open-meteo 逐小时预报上限3天
         url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
                f"&hourly=cloud_cover&timezone=UTC&forecast_days={days}")
@@ -538,6 +536,10 @@ def main():
             "云量最低时段": {"起": best[1], "止": best[2], "均云量%": best[0]} if best else None,
             "逐小时": [{"时间UTC": t, "云量%": c} for t, c in hours],
         })
+
+    elif cmd == "dispatch":
+        die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
+            "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
 
     elif cmd == "delete" and arg:
         tid = int(arg)
