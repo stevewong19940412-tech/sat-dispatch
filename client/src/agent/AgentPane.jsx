@@ -86,9 +86,11 @@ const clientSingleton = baUrl ? new BladeClient({ baseUrl: baUrl }) : null;
 export const client = clientSingleton;
 
 // ─── 助手面板组件（右侧对话面板 + 会话菜单 + 设置）─────────────────────────
-export function AgentPane({ visible, onClose, getContext, aoiContext }) {
+export function AgentPane({ visible, onClose, getContext, aoiContext, onAoiConsumed }) {
   const aoiContextRef = useRef(null);
   aoiContextRef.current = aoiContext;
+  // 消费哨兵：同一次选区只注入一次（onSessionReady 可能因 ChatView 重挂载触发多次）
+  const aoiConsumedKeyRef = useRef(null);
   const [sessionId, setSessionId] = useState(null);
   const [session, setSession] = useState(null);
   const [models, setModels] = useState([]);
@@ -170,11 +172,15 @@ export function AgentPane({ visible, onClose, getContext, aoiContext }) {
     // AOI 圈选上下文注入：圈选后点"交给 AI 建任务"打开面板时，把选区预填进输入框（不自动发送，用户确认参数后发送）
     if (aoiContextRef.current && sess?.insertText) {
       const a = aoiContextRef.current;
+      const key = `${a.lat.toFixed(4)}|${a.lon.toFixed(4)}|${a.radiusKm}`;
+      if (aoiConsumedKeyRef.current === key) return; // 同一次选区已注入，跳过
+      aoiConsumedKeyRef.current = key;
       sess.insertText(
         `我在三维地球圈选了一个关注区域（AOI）：圆心北纬 ${a.lat.toFixed(3)}°、东经 ${a.lon.toFixed(3)}°，半径 ${a.radiusKm}km。` +
         `请按此区域帮我建观测任务并走完调度流程（分辨率/观测类型/时窗/云量如未说明请你按业务惯例给默认值并先告诉我）。`
       );
-      aoiContextRef.current = null; // 注入一次即清，防切会话重复预填
+      // 消费完成：通知 App 清空 aoiContext state（ref 由 props 驱动，不清 state 会在下次渲染被写回）
+      onAoiConsumed?.();
     }
   };
 

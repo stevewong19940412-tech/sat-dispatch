@@ -438,6 +438,7 @@ export default function App() {
       <Suspense fallback={null}><AgentPane
         visible={agentVisible}
         aoiContext={aoiContext}
+        onAoiConsumed={() => setAoiContext(null)}
         onClose={() => setAgentVisible(false)}
         getContext={() => ({
           appOrigin: location.origin,
