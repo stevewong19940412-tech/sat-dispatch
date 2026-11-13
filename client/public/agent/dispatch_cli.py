@@ -113,11 +113,15 @@ def _pb_api(path):
                 with urllib.request.urlopen(req, timeout=60) as r:
                     return json.loads(r.read().decode())
             except urllib.error.HTTPError as e:
-                if e.code not in (404, 400):  # 代理不可用则回退直连
+                if e.code == 404:
+                    die("查询通道未就绪：线上版本尚无 /dispatch/_pbq 代理（需部署 CLI v8 配套服务端）。"
+                        "请等待部署完成后重试，或由运维执行 blade app deploy up。")
+                if e.code not in (400,):
                     detail = e.read().decode(errors="replace")[:300]
                     die(f"PB 查询失败(代理): {path} → HTTP {e.code}: {detail}")
-            except Exception:
-                pass  # 网络异常回退直连
+            except Exception as e2:
+                die(f"查询通道不可达：代理网络异常({e2})，且 PB 直连在本环境不可用（PB 仅容器内 127.0.0.1:8091）。"
+                    "请检查 DISPATCH_APP_BASE 是否指向线上应用。")
     req = urllib.request.Request(PB_URL + path, headers={"Authorization": _pb_auth()})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
