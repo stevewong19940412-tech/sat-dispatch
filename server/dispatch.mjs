@@ -336,6 +336,23 @@ dispatchApi.get("/_pb-peek", async (req, res) => {
     res.json(r.items);
   } catch (e) { res.status(500).json({ error: e.message.slice(0, 200) }); }
 });
+dispatchApi.get("/_pbq", async (req, res) => {
+  // CLI v7 的 q() 通道：PB 只读代理（线上 PB 仅容器内可见，外部 CLI 无法直连）
+  const { table, filter, sort, perPage, expand, fields, page } = req.query;
+  const ALLOW = new Set(["tasks", "candidates", "rankings", "orders", "directPlans", "companies", "fulfillmentLog", "taskPool", "dispatchLog", "missions", "satellites"]);
+  if (!ALLOW.has(table)) return res.status(400).json({ error: 'collection 不在白名单: ' + table });
+  try {
+    const p = new URLSearchParams();
+    if (filter) p.set('filter', filter);
+    if (sort) p.set('sort', sort);
+    p.set('perPage', perPage || '200');
+    p.set('page', page || '1');
+    if (expand) p.set('expand', expand);
+    if (fields) p.set('fields', fields);
+    const r = await pbList(table, Object.fromEntries(p));
+    res.json({ items: r.items, totalItems: r.total, page: r.page, totalPages: Math.ceil((r.total||0)/(parseInt(perPage)||200)) });
+  } catch (e) { res.status(500).json({ error: e.message.slice(0, 200) }); }
+});
 dispatchApi.get("/_pb-schema", async (req, res) => {
   try {
     const PB = process.env.PB_URL || 'http://127.0.0.1:8091';

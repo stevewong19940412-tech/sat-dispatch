@@ -3,9 +3,9 @@
 智能体通过 Bash 直接调用：dispatch <子命令> [参数]
 数据来源：调度系统 API（127.0.0.1 内部）与 PocketBase 实例
 """
-import json, os, sys, urllib.parse, urllib.request
+import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 7  # v7: q() 从 POST /_sql(SQL直查) 重写为 PocketBase REST(filter翻译)，_sql 已随 PB 迁移弃用（v6=批量建单 v4=补齐 sats/companies+--help v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 8  # v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -99,6 +99,25 @@ def _pb_auth():
     return _pb_token
 
 def _pb_api(path):
+    # 双通道：优先走应用侧只读代理 /dispatch/_pbq（线上 PB 仅容器内可见，外部 CLI 直连会 refused）；
+    # 仅当明确设置了 DISPATCH_PB_URL（沙盒同机演练）或代理不可用时才直连 PB。
+    if path.startswith("/api/collections/"):
+        m = re.match(r"/api/collections/(\w+)/records\??(.*)", path)
+        if m and APP_BASE:
+            table, qs = m.group(1), m.group(2)
+            params = urllib.parse.parse_qs(qs)
+            q = urllib.parse.urlencode({k: v[0] for k, v in params.items() if k in ("filter","sort","perPage","expand","fields","page")})
+            req = urllib.request.Request(APP_BASE + f"/api/dispatch/_pbq?table={table}" + (("&"+q) if q else ""),
+                                         headers=_headers())
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                if e.code not in (404, 400):  # 代理不可用则回退直连
+                    detail = e.read().decode(errors="replace")[:300]
+                    die(f"PB 查询失败(代理): {path} → HTTP {e.code}: {detail}")
+            except Exception:
+                pass  # 网络异常回退直连
     req = urllib.request.Request(PB_URL + path, headers={"Authorization": _pb_auth()})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
