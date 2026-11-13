@@ -437,6 +437,7 @@ export default function App() {
       {workbench && <DispatchWorkbench onBack={() => setWorkbench(false)} />}
       <Suspense fallback={null}><AgentPane
         visible={agentVisible}
+        aoiContext={aoiContext}
         onClose={() => setAgentVisible(false)}
         getContext={() => ({
           appOrigin: location.origin,
