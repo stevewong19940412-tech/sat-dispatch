@@ -1,14 +1,14 @@
 // 卫星任务规划系统 - API 服务器
 import express from "express";
 import { createServer } from "http";
+// 数据层已全量迁 PocketBase（2026-11-15）：不再依赖 SQLite/db.mjs/dispatch_schema
 import {
-  db, getAllSatellites, getSatellitesByCategory, getSatelliteByNoradId,
+  getAllSatellites, getSatellitesByCategory, getSatelliteByNoradId,
   searchSatellites, getCategories, listMissions, getMission, createMission,
   updateMission, deleteMission, getStaticLayer, setStaticLayer,
-} from "./db.mjs";
+} from "./sat_repo.mjs";
 import { propagate, groundTrack, predictPasses, tleAgeDays } from "./orbit.mjs";
 import { dispatchApi } from "./dispatch.mjs";
-import "./dispatch_schema.mjs";
 import { fileURLToPath } from "url";
 import { existsSync } from "fs";
 import { dirname, join } from "path";
@@ -27,8 +27,8 @@ app.use(express.json());
 const api = express.Router();
 
 // 类别与计数
-api.get("/categories", (req, res) => {
-  const counts = Object.fromEntries(getCategories().map(r => [r.category, r.count]));
+api.get("/categories", async (req, res) => {
+  const counts = Object.fromEntries((await getCategories()).map(r => [r.category, r.count]));
   const META = {
     imaging: { label: "光学/雷达成像", color: "#10b981", orbitType: "LEO", description: "光学与SAR成像卫星（WorldView/Sentinel/高分/吉林一号等）" },
     recon: { label: "成像侦察", color: "#ef4444", orbitType: "LEO", description: "成像侦察卫星（KH-11/遥感系列/COSMOS等）" },
@@ -43,13 +43,13 @@ api.get("/categories", (req, res) => {
 // 全部卫星实时位置 —— 服务端共享缓存（对照工作台 sseDataPump 架构）：
 // 传播结果全站共享 10s，N 个客户端 5s 轮询只触发 1 次真实计算，其余命中缓存
 let _posCache = { data: null, at: 0 };
-api.get("/positions", (req, res) => {
+api.get("/positions", async (req, res) => {
   const date = req.query.timestamp ? new Date(parseInt(req.query.timestamp)) : new Date();
   const now = Date.now();
   if (_posCache.data && now - _posCache.at < 10000) {
     return res.json(_posCache.data);
   }
-  const sats = getAllSatellites();
+  const sats = await getAllSatellites();
   const positions = [];
   for (const sat of sats) {
     const pos = propagate(sat, date);
@@ -86,44 +86,49 @@ api.get("/sse/positions", (req, res) => {
   req.on("close", () => { clearInterval(hb); sseClients.delete(res); });
 });
 // SSE 泵：有订阅者才计算，10s 一次
-setInterval(() => {
+setInterval(async () => {
   if (sseClients.size === 0) return;
-  const date = new Date();
-  const sats = getAllSatellites();
-  const positions = [];
-  for (const sat of sats) {
-    const pos = propagate(sat, date);
-    if (pos) positions.push({ noradId: sat.noradId, name: sat.name, category: sat.category, ...pos });
+  // PB 超时不能变成未捕获拒绝（未处理拒绝在 Node 24 下可能直接终止进程）
+  try {
+    const date = new Date();
+    const sats = await getAllSatellites();
+    const positions = [];
+    for (const sat of sats) {
+      const pos = propagate(sat, date);
+      if (pos) positions.push({ noradId: sat.noradId, name: sat.name, category: sat.category, ...pos });
+    }
+    _posCache = { data: { satellites: positions, timestamp: date.getTime() }, at: Date.now() };
+    const frame = `data: ${JSON.stringify(_posCache.data)}\n\n`;
+    for (const client of sseClients) client.write(frame);
+  } catch (e) {
+    console.error("[sse/positions] 位置推送失败:", e?.message ?? e);
   }
-  _posCache = { data: { satellites: positions, timestamp: date.getTime() }, at: Date.now() };
-  const frame = `data: ${JSON.stringify(_posCache.data)}\n\n`;
-  for (const client of sseClients) client.write(frame);
 }, 10000);
 
 // 单星地面轨迹
-api.get("/track/:noradId", (req, res) => {
-  const sat = getSatelliteByNoradId(parseInt(req.params.noradId));
+api.get("/track/:noradId", async (req, res) => {
+  const sat = await getSatelliteByNoradId(parseInt(req.params.noradId));
   if (!sat) return res.status(404).json({ error: "satellite not found" });
   const minutesAhead = parseInt(req.query.minutes ?? "90", 10);
   res.json({ noradId: sat.noradId, track: groundTrack(sat, minutesAhead) });
 });
 
 // 卫星档案
-api.get("/satellite/:noradId", (req, res) => {
-  const sat = getSatelliteByNoradId(parseInt(req.params.noradId));
+api.get("/satellite/:noradId", async (req, res) => {
+  const sat = await getSatelliteByNoradId(parseInt(req.params.noradId));
   if (!sat) return res.status(404).json({ error: "satellite not found" });
   res.json(sat);
 });
 
 // 搜索
-api.get("/search", (req, res) => {
+api.get("/search", async (req, res) => {
   const q = req.query.q ?? "";
-  res.json(searchSatellites(q, parseInt(req.query.limit ?? "50", 10)));
+  res.json(await searchSatellites(q, parseInt(req.query.limit ?? "50", 10)));
 });
 
 // 过境预报
-api.get("/passes/:noradId", (req, res) => {
-  const sat = getSatelliteByNoradId(parseInt(req.params.noradId));
+api.get("/passes/:noradId", async (req, res) => {
+  const sat = await getSatelliteByNoradId(parseInt(req.params.noradId));
   if (!sat) return res.status(404).json({ error: "satellite not found" });
   const obsLat = parseFloat(req.query.lat);
   const obsLon = parseFloat(req.query.lon);
@@ -136,14 +141,14 @@ api.get("/passes/:noradId", (req, res) => {
 });
 
 // 多星过境汇总（任务用）
-api.post("/passes/batch", (req, res) => {
+api.post("/passes/batch", async (req, res) => {
   const { noradIds, lat, lon, alt = 0, hours = 24, minElev = 5 } = req.body ?? {};
   if (!Array.isArray(noradIds) || isNaN(lat) || isNaN(lon)) {
     return res.status(400).json({ error: "noradIds[], lat, lon required" });
   }
   const results = [];
   for (const nid of noradIds) {
-    const sat = getSatelliteByNoradId(nid);
+    const sat = await getSatelliteByNoradId(nid);
     if (!sat) continue;
     const passes = predictPasses(sat, lat, lon, alt, hours, minElev);
     results.push({ noradId: nid, name: sat.name, category: sat.category, passes });
@@ -152,40 +157,48 @@ api.post("/passes/batch", (req, res) => {
 });
 
 // ─── 任务管理 ─────────────────────────────────────────────────────────────
-api.get("/missions", (req, res) => {
-  res.json(listMissions(req.query.status, parseInt(req.query.limit ?? "100", 10)));
+api.get("/missions", async (req, res) => {
+  res.json(await listMissions(req.query.status, parseInt(req.query.limit ?? "100", 10)));
 });
-api.get("/missions/:id", (req, res) => {
-  const m = getMission(parseInt(req.params.id));
+api.get("/missions/:id", async (req, res) => {
+  const m = await getMission(parseInt(req.params.id));
   if (!m) return res.status(404).json({ error: "mission not found" });
   res.json(m);
 });
-api.post("/missions", (req, res) => {
+api.post("/missions", async (req, res) => {
   const { name } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
-  res.json(createMission(req.body));
+  res.json(await createMission(req.body));
 });
-api.put("/missions/:id", (req, res) => {
-  const m = updateMission(parseInt(req.params.id), req.body ?? {});
+api.put("/missions/:id", async (req, res) => {
+  const m = await updateMission(parseInt(req.params.id), req.body ?? {});
   if (!m) return res.status(404).json({ error: "mission not found" });
   res.json(m);
 });
-api.delete("/missions/:id", (req, res) => {
-  deleteMission(parseInt(req.params.id));
+api.delete("/missions/:id", async (req, res) => {
+  await deleteMission(parseInt(req.params.id));
   res.json({ ok: true });
 });
 
 // ─── 静态图层 ─────────────────────────────────────────────────────────────
-api.get("/layers/:type", (req, res) => {
-  res.json(getStaticLayer(req.params.type) ?? { points: [], static: true });
+api.get("/layers/:type", async (req, res) => {
+  res.json((await getStaticLayer(req.params.type)) ?? { points: [], static: true });
 });
-api.post("/layers/:type", (req, res) => {
-  setStaticLayer(req.params.type, req.body);
+api.post("/layers/:type", async (req, res) => {
+  await setStaticLayer(req.params.type, req.body);
   res.json({ ok: true });
 });
 
 app.use("/api", api);
 app.use("/api/dispatch", dispatchApi);
+
+// 异步路由统一兜底：数据层全部改 PB 后接口都是 async，
+// 若 PB 不可用/超时，必须返回 503 而不是让未捕获拒绝拖垮进程。
+app.use("/api", (err, req, res, next) => {
+  console.error(`[api] ${req.method} ${req.originalUrl} 失败:`, err?.message ?? err);
+  if (res.headersSent) return next(err);
+  res.status(503).json({ error: "数据服务暂不可用（PocketBase）", detail: String(err?.message ?? err) });
+});
 
 // ─── 静态文件（构建产物） ─────────────────────────────────────────────────
 // 部署态：client-dist 平铺在 runtime 根；开发态：../client/dist

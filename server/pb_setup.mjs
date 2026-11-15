@@ -1,17 +1,28 @@
 // ─── PB 启动自举（node 服务启动后异步执行，幂等）──────────────────────────
 // 1. 等待容器内 PB (127.0.0.1:8091) 健康
 // 2. 确保 collections 存在（从 seed SQLite 结构建，已存在跳过）
+//
+// ⚠️ 边界说明（2026-11-15）：本文件是**一次性初始化工具**，不是运行期数据源。
+// 运行期所有读写已全量走 PocketBase（见 sat_repo.mjs / pb_repo.mjs），
+// 这里的 better-sqlite3 仅在「PB 首次建库」时读取 seed SQLite 的表结构与种子数据，
+// 由 counters.migration_done 标记控制——迁移完成后永不再执行。
 // 3. 数据迁移（断点续跑：行数满足即跳过+回读映射）
 // 复用 scripts/pb_migrate.mjs 的核心逻辑，但以模块形式供 index.mjs 调用
 import Database from "better-sqlite3";
 import { join, dirname } from "path";
+import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PB_URL = process.env.PB_URL || "http://127.0.0.1:8091";
 const PB_ADMIN = process.env.PB_ADMIN || "admin@sat.local";
 const PB_PASS = process.env.PB_PASS || "SatDispatch2026!";
-const SQLITE_PATH = process.env.SQLITE_PATH || join(__dirname, "..", "data", "satplanning.db");
+// 种子库路径：优先 seed 副本（部署容器只有它），本地开发回退到 data/satplanning.db
+const SQLITE_PATH = process.env.SQLITE_PATH || (() => {
+  const seed = join(__dirname, "..", "data", "seed-satplanning.db");
+  const live = join(__dirname, "..", "data", "satplanning.db");
+  return existsSync(seed) ? seed : live;
+})();
 const BATCH = 200;
 
 const SQL_TYPE_MAP = { TEXT: "text", REAL: "number", INTEGER: "number", BLOB: "text" };
@@ -139,48 +150,7 @@ async function ensureCountersCollection() {
   console.log("[pb_setup] [counters] collection 创建");
 }
 
-export async function runSetup(opts = {}) {
-  const t0 = Date.now();
-  await waitPbHealthy();
-  await ensureCountersCollection().catch(e => console.error("[pb_setup] counters 自举失败:", e.message));
-  // 开 batch
-  await api("/api/settings", "PATCH", { batch: { enabled: true, maxRequests: 500, timeout: 120 } }).catch(() => null);
-  // 清 migrations 快照（防按字母序重放断链）——容器内 PB data 目录
-  // 首迁标记：PB 已完成过一次数据迁移就不再从 seed SQLite 灌数据（否则清空后的数据会被回填）
-  const doneFlag = await api(`/api/collections/counters/records?filter=${encodeURIComponent("name='migration_done'")}`).catch(() => null);
-  const migrated = doneFlag?.items?.[0]?.value === 1;
-  const sqlite = new Database(SQLITE_PATH, { readonly: true });
-  const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(r => r.name);
-  const order = ["tasks", "candidates", "rankings", "orders", "directPlans", "companies", "fulfillmentLog", "taskPool", "dispatchLog", "missions", "static_layers", "satellites"];
-  const sorted = order.filter(t => tables.includes(t)).concat(tables.filter(t => !order.includes(t)));
-  let allOk = true;
-  const summary = [];
-  for (const name of sorted) {
-    try {
-      const cols = sqlite.prepare(`PRAGMA table_info(${name})`).all();
-      const rels = REL_FIELD_MAP[name] || [];
-      await ensureCollection(name, cols, rels, sqlite);
-      const r = migrated ? { src: 0, dst: -1 } : await migrateTable(name, cols, rels, sqlite);
-      summary.push(`${name}:${r.dst}/${r.src}`);
-      if (!migrated && r.dst < r.src) allOk = false;
-    } catch (e) {
-      console.error(`[pb_setup] [${name}] 失败: ${e.stack ? e.stack.slice(0, 400) : e.message}`);
-      allOk = false;
-    }
-  }
-  if (!migrated) {
-    // 写首迁标记
-    const flag = await api(`/api/collections/counters/records?filter=${encodeURIComponent("name='migration_done'")}`).catch(() => null);
-    if (flag?.items?.[0]) await api(`/api/collections/counters/records/${flag.items[0].id}`, "PATCH", { value: 1 });
-    else await api("/api/collections/counters/records", "POST", { name: "migration_done", value: 1 });
-    console.log("[pb_setup] 首迁完成，已写标记");
-  } else {
-    console.log("[pb_setup] 已迁移过（migration_done=1），跳过数据灌入");
-  }
-  // relation 字段自愈：仅显式触发时执行（启动路径 skipRelHeal=true 跳过，防 PATCH 失败影响启动）
-  if (opts.skipRelHeal) {
-    console.log("[pb_setup] 跳过 relation 自愈（skipRelHeal）");
-  } else {
+async function healRelations() {
   await auth();
   const cols2 = await api("/api/collections");
   const arr2 = cols2.items || cols2;
@@ -213,7 +183,65 @@ export async function runSetup(opts = {}) {
     if (r.id) { fixedRel++; console.log(`[pb_setup] [${spec.table}.${spec.field}] ${f.type} → relation 自愈`); }
   }
   if (fixedRel) console.log(`[pb_setup] relation 自愈 ${fixedRel} 个字段`);
-  } // end skipRelHeal else
+}
+
+export async function runSetup(opts = {}) {
+  const t0 = Date.now();
+  await waitPbHealthy();
+  await ensureCountersCollection().catch(e => console.error("[pb_setup] counters 自举失败:", e.message));
+  // 开 batch
+  await api("/api/settings", "PATCH", { batch: { enabled: true, maxRequests: 500, timeout: 120 } }).catch(() => null);
+  // 清 migrations 快照（防按字母序重放断链）——容器内 PB data 目录
+  // 首迁标记：PB 已完成过一次数据迁移就不再从 seed SQLite 灌数据（否则清空后的数据会被回填）
+  const doneFlag = await api(`/api/collections/counters/records?filter=${encodeURIComponent("name='migration_done'")}`).catch(() => null);
+  const migrated = doneFlag?.items?.[0]?.value === 1;
+  // P0 修复（2026-11-15）：已首迁完成就**根本不打开 SQLite**——运行期只有一个数据源（PB）。
+  // 只有「首次建库」且 seed 文件真实存在时才读 SQLite，读完立刻 close，避免句柄泄漏与隐性耦合。
+  if (migrated) {
+    console.log("[pb_setup] 已迁移过（migration_done=1），跳过数据灌入，不打开 SQLite");
+    if (opts.skipRelHeal) return console.log("[pb_setup] 跳过 relation 自愈（skipRelHeal）");
+    return await healRelations();
+  }
+  if (!existsSync(SQLITE_PATH)) {
+    console.error(`[pb_setup] 首次初始化但找不到种子库 ${SQLITE_PATH}，跳过灌数据（PB 将为空库）`);
+    if (opts.skipRelHeal) return console.log("[pb_setup] 跳过 relation 自愈（skipRelHeal）");
+    return await healRelations();
+  }
+  const sqlite = new Database(SQLITE_PATH, { readonly: true });
+  const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(r => r.name);
+  const order = ["tasks", "candidates", "rankings", "orders", "directPlans", "companies", "fulfillmentLog", "taskPool", "dispatchLog", "missions", "static_layers", "satellites"];
+  const sorted = order.filter(t => tables.includes(t)).concat(tables.filter(t => !order.includes(t)));
+  let allOk = true;
+  const summary = [];
+  for (const name of sorted) {
+    try {
+      const cols = sqlite.prepare(`PRAGMA table_info(${name})`).all();
+      const rels = REL_FIELD_MAP[name] || [];
+      await ensureCollection(name, cols, rels, sqlite);
+      const r = migrated ? { src: 0, dst: -1 } : await migrateTable(name, cols, rels, sqlite);
+      summary.push(`${name}:${r.dst}/${r.src}`);
+      if (!migrated && r.dst < r.src) allOk = false;
+    } catch (e) {
+      console.error(`[pb_setup] [${name}] 失败: ${e.stack ? e.stack.slice(0, 400) : e.message}`);
+      allOk = false;
+    }
+  }
+  sqlite.close(); // 首迁读完即释放，运行期不再持有 SQLite 句柄
+  if (!migrated) {
+    // 写首迁标记
+    const flag = await api(`/api/collections/counters/records?filter=${encodeURIComponent("name='migration_done'")}`).catch(() => null);
+    if (flag?.items?.[0]) await api(`/api/collections/counters/records/${flag.items[0].id}`, "PATCH", { value: 1 });
+    else await api("/api/collections/counters/records", "POST", { name: "migration_done", value: 1 });
+    console.log("[pb_setup] 首迁完成，已写标记");
+  } else {
+    console.log("[pb_setup] 已迁移过（migration_done=1），跳过数据灌入");
+  }
+  // relation 字段自愈：仅显式触发时执行（启动路径 skipRelHeal=true 跳过，防 PATCH 失败影响启动）
+  if (opts.skipRelHeal) {
+    console.log("[pb_setup] 跳过 relation 自愈（skipRelHeal）");
+  } else {
+    await healRelations();
+  }
   console.log(`[pb_setup] 完成 (${((Date.now()-t0)/1000).toFixed(1)}s): ${summary.join(' ')}`);
   return { ok: allOk, summary };
 }

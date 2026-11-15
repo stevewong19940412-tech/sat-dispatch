@@ -2,7 +2,6 @@
 import fs from "fs";
 import path from "path";
 import express from "express";
-import { db } from "./db.mjs";
 import {
   pbList, pbAll, pbGet, pbGetByOldId, pbRecordId, pbCreate, pbUpdate, pbDelete, pbBatch, pbNextSeq,
 } from "./pb_repo.mjs";

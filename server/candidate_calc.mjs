@@ -2,7 +2,6 @@
 // 流程：轨道预报 → 可见窗计算 → 约束筛选 → 云量解算 → 候选清单输出
 // 确定性计算，全部可复算。轨道预报基于底座 SGP4。
 import * as satellite from "satellite.js";
-import { db } from "./db.mjs";
 import { getSatSpec, getCapabilityBySpec } from "./sat_specs.mjs";
 
 const EARTH_R = 6371;
