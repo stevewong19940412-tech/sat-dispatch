@@ -1002,7 +1002,9 @@ export function validateCommands(commands, sat, plan) {
       const caps = getCapability(sat);
       const halfKm = caps.swathKm / 2;
       const minKm = plan.minDistKm ?? null;
-      const altKm = sat.altitude && sat.altitude < 20000 ? sat.altitude : null;
+      // 近地轨道才给出"需多高才够拍"的换算（GEO 凝视星用另一种几何，不适用该口径）。
+      // 2026-11-15：卫星 altitude 曾全库放大 ~79 倍，导致这里恒为 null；数据已按 TLE 修正。
+      const altKm = Number.isFinite(+sat.altitude) && sat.altitude > 100 && sat.altitude < 20000 ? +sat.altitude : null;
       const overKm = minKm != null ? Math.round((minKm - halfKm) * 10) / 10 : null;
       errors.push({
         code: 'SWATH_NO_COVER',
