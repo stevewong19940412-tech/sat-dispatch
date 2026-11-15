@@ -29,14 +29,25 @@ const api = express.Router();
 // 类别与计数
 api.get("/categories", async (req, res) => {
   const counts = Object.fromEntries((await getCategories()).map(r => [r.category, r.count]));
+  // 可调度口径（与任务候选池一致）：只算中国卫星中的光学/凝视/高光谱/SAR。
+  // 首页原先只给全库 310 颗的分类计数，容易被误读成"能用的卫星数"——
+  // 这两者差异很大（外国星 24 颗 + 气象/科学/海洋等非成像星），故一并返回供前端标注。
+  let dispatchable = 0;
+  try {
+    const all = await getAllSatellites();
+    dispatchable = all.filter(s => s.country === '中国'
+      && ['optical', 'staring', 'hyperspectral', 'sar'].includes(s.subCategory)).length;
+  } catch {}
   const META = {
     imaging: { label: "光学/雷达成像", color: "#10b981", orbitType: "LEO", description: "光学与SAR成像卫星（WorldView/Sentinel/高分/吉林一号等）" },
     recon: { label: "成像侦察", color: "#ef4444", orbitType: "LEO", description: "成像侦察卫星（KH-11/遥感系列/COSMOS等）" },
     weather: { label: "气象对地观测", color: "#22d3ee", orbitType: "MIXED", description: "气象卫星（风云/NOAA/METOP/GOES等）" },
     science: { label: "对地观测科学星", color: "#84cc16", orbitType: "LEO", description: "对地观测科学卫星（Landsat/Terra/Aqua/SWARM等）" },
   };
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  res.setHeader('X-Dispatchable-China', String(dispatchable));
   res.json(Object.entries(META).map(([key, val]) => ({
-    key, ...val, count: counts[key] ?? 0,
+    key, ...val, count: counts[key] ?? 0, total, dispatchableChina: dispatchable,
   })));
 });
 

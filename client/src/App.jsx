@@ -264,6 +264,12 @@ export default function App() {
         </div>
         <div className="topbar-stats">
           <span>在轨遥感 <b>{positions.filter(s => enabledCats.has(s.category)).length}</b></span>
+          {/* 明确区分口径：上面是"当前筛选下在轨的星"，这里是"真正能进任务候选池的中国星" */}
+          {categories[0]?.dispatchableChina != null && (
+            <span title="可参与任务调度的卫星：中国在轨的光学/凝视/高光谱/SAR 卫星（含高分、资源、吉林、高景、遥感等），不含外国星与气象/科学/海洋类">
+              可调度 <b>{categories[0].dispatchableChina}</b>
+            </span>
+          )}
           {categories.map(c => (
             <span key={c.key}>{CATEGORY_META[c.key]?.label ?? c.key} <b>{c.count}</b></span>
           ))}
