@@ -1,38 +1,51 @@
-// 卫星载荷参数库与直控参数解算（来源：三路调研智能体产出，docs/载荷参数规格-真实调研.md 等）
-// 标注规则：spec 值分两类 — real（文献/官方真实值）、typical（类别典型值，型号未公开）
+// 卫星载荷参数库（相机体制/量化位数/侧摆速率/像元尺寸）
+// ⚠️ 幅宽、分辨率、侧摆上限自 2026-11-15 统一由 sat_specs.mjs 提供（官方公开参数），本表不再维护，
+//    避免出现 JILIN swathKm=150 与 DEFAULT_CAPS=12 这类同一型号两套口径的冲突。
+// 标注规则：real（文献/官方真实值）、typical（类别典型值，型号未公开）
 // 字段规格依据：docs/载荷参数规格-真实调研.md + CN102830951B（指令时序） + CCSDS 231/232（指令格式）
+import { getSatSpec } from "./sat_specs.mjs";
 
 export const PAYLOAD_SPECS = {
-  'GAOFEN-1': { gsdPan: 2,   gsdMs: 8,   swathKm: 60,  quantBits: 10, quantSrc: 'typical',
-             slewMax: 35, slewRate: 0.13, slewSrc: 'real(±25°/200s,应急35°)', tdiSrc: 'typical', pixelUm: 10,
+  'GAOFEN-1': { quantBits: 10, quantSrc: 'typical', slewRate: 0.13, slewSrc: 'real(±25°/200s,应急35°)', tdiSrc: 'typical', pixelUm: 10,
              mode: 'strip', camera: 'TDI-CCD线阵推扫' },
-  'GAOFEN-2': { gsdPan: 0.8, gsdMs: 3.2, swathKm: 45,  quantBits: 10, quantSrc: 'typical',
-             slewMax: 35, slewRate: 0.19, slewSrc: 'real(±35°/180s)', tdiSrc: 'typical', pixelUm: 10,
+  'GAOFEN-2': { quantBits: 10, quantSrc: 'typical', slewRate: 0.19, slewSrc: 'real(±35°/180s)', tdiSrc: 'typical', pixelUm: 10,
              mode: 'strip', camera: 'TDI-CCD线阵推扫' },
-  'GAOFEN-4': { gsdPan: 50,  gsdMs: 400, swathKm: 400, quantBits: 10, quantSrc: 'typical',
-             slewMax: 0,  slewRate: 0,    slewSrc: 'GEO凝视指向控制', tdiSrc: 'n/a(CMOS电子快门)', pixelUm: 10,
+  'GAOFEN-4': { quantBits: 10, quantSrc: 'typical', slewRate: 0,    slewSrc: 'GEO凝视指向控制', tdiSrc: 'n/a(CMOS电子快门)', pixelUm: 10,
              mode: 'staring', camera: '面阵凝视CMOS' },
-  'GAOFEN-6': { gsdPan: 2,   gsdMs: 8,   swathKm: 90,  quantBits: 10, quantSrc: 'typical',
-             slewMax: 25, slewRate: 0.13, slewSrc: 'typical(±25°级)', tdiSrc: 'typical(CMOS非TDI)', pixelUm: 10,
+  'GAOFEN-6': { quantBits: 10, quantSrc: 'typical', slewRate: 0.13, slewSrc: 'typical(±25°级)', tdiSrc: 'typical(CMOS非TDI)', pixelUm: 10,
              mode: 'strip', camera: '线阵推扫+宽幅CMOS' },
-  'JILIN': { gsdPan: 0.5, gsdMs: 2,   swathKm: 150, quantBits: 12, quantSrc: 'typical',
-             slewMax: 45, slewRate: 1.0,  slewSrc: 'real(高分02系列±45°)', tdiSrc: 'typical', pixelUm: 7,
+  'JILIN': { quantBits: 12, quantSrc: 'typical', slewRate: 1.0,  slewSrc: 'real(高分02系列±45°)', tdiSrc: 'typical', pixelUm: 7,
              mode: 'strip+multiStrip', camera: 'TDI-CCD推扫' },
-  'SUPERVIEW': { gsdPan: 0.5, gsdMs: 2, swathKm: 12, quantBits: 11, quantSrc: 'real(SV-1 11bit)',
-             slewMax: 45, slewRate: 1.2, slewSrc: 'real(±30°重点45°)', tdiSrc: 'typical', pixelUm: 8,
+  'SUPERVIEW': { quantBits: 11, quantSrc: 'real(SV-1 11bit)', slewRate: 1.2, slewSrc: 'real(±30°重点45°)', tdiSrc: 'typical', pixelUm: 8,
              mode: 'strip', camera: 'TDI-CCD推扫' },
-  'ZY3': { gsdPan: 2.1, gsdMs: 5.8, swathKm: 51,  quantBits: 10, quantSrc: 'typical',
-             slewMax: 32, slewRate: 0.3,  slewSrc: 'real(±32°)', tdiSrc: 'typical', pixelUm: 10,
+  'ZY3': { quantBits: 10, quantSrc: 'typical', slewRate: 0.3,  slewSrc: 'real(±32°)', tdiSrc: 'typical', pixelUm: 10,
              mode: 'strip+stereo', camera: 'TDI-CCD三线阵' },
-  'HAIYANG': { gsdPan: 1, gsdMs: 1, swathKm: 100, quantBits: 10, quantSrc: 'typical',
-             slewMax: 0,  slewRate: 0,    slewSrc: 'SAR条带模式', tdiSrc: 'n/a(SAR)', pixelUm: 0,
+  'HAIYANG': { quantBits: 10, quantSrc: 'typical', slewRate: 0,    slewSrc: 'SAR条带模式', tdiSrc: 'n/a(SAR)', pixelUm: 0,
              mode: 'sarStrip', camera: 'SAR-C' },
 };
 
-// 按卫星名前缀匹配载荷规格
+// 按卫星名匹配载荷规格：相机体制取本表，幅宽/分辨率/侧摆取 sat_specs 单一数据源
 export function getPayloadSpec(satName) {
   const key = Object.keys(PAYLOAD_SPECS).find(k => satName?.toUpperCase().startsWith(k));
-  return key ? { series: key, ...PAYLOAD_SPECS[key] } : null;
+  const spec = getSatSpec({ name: satName });
+  const base = key ? { series: key, ...PAYLOAD_SPECS[key] } : {
+    series: 'GENERIC', quantBits: 10, quantSrc: 'typical',
+    slewRate: spec.cat === 'SAR' ? 0 : 1.0, slewSrc: 'typical', tdiSrc: 'typical', pixelUm: 10,
+    mode: spec.cat === 'SAR' ? 'sarStrip' : 'strip',
+    camera: spec.cat === 'SAR' ? 'SAR' : '推扫',
+  };
+  // 幅宽/分辨率以型号规格表（官方公开参数）为准，避免与覆盖判定口径不一致。
+  // 历史问题：本表曾写 JILIN swathKm=150、DEFAULT_CAPS 写 12，同一型号差 12 倍。
+  return {
+    ...base,
+    gsdPan: spec.resM,
+    gsdMs: base.gsdMs ?? Math.max(2, spec.resM * 4),
+    swathKm: spec.swathKm,
+    slewMax: spec.slewMax,
+    specKey: spec.key,
+    swathSrc: spec.src,
+    swathFallback: spec.fallback,
+  };
 }
 
 /**
@@ -43,8 +56,7 @@ export function getPayloadSpec(satName) {
 export function solveImagingParams({ satName, altKm, gsdM, sunElDeg, slewDeg, imagingSec }) {
   const spec = getPayloadSpec(satName) ?? {
     // 未收录型号：类别典型值兜底（标注 typical）
-    series: 'GENERIC', gsdPan: gsdM, gsdMs: gsdM * 4, swathKm: 14, quantBits: 10, quantSrc: 'typical',
-    slewMax: 45, slewRate: 1.0, slewSrc: 'typical', tdiSrc: 'typical', pixelUm: 10,
+    series: 'GENERIC', gsdPan: gsdM, gsdMs: gsdM * 4, swathKm: 14, quantBits: 10, quantSrc: 'typical', slewRate: 1.0, slewSrc: 'typical', tdiSrc: 'typical', pixelUm: 10,
     mode: 'strip', camera: '推扫',
   };
   const isGEO = altKm > 10000;
@@ -78,7 +90,7 @@ export function solveImagingParams({ satName, altKm, gsdM, sunElDeg, slewDeg, im
     estDataMB: dataMB, estDataRows: Math.round(alongKm * 1000 / gsdM),
     slewDeg: Math.round(slewDeg * 10) / 10,
     slewRateLimitDegS: spec.slewRate, slewSource: spec.slewSrc,
-    sources: { swath: 'DEFAULT_CAPS+调研', quant: spec.quantSrc, slew: spec.slewSrc, tdi: spec.tdiSrc },
+    sources: { swath: spec.swathSrc, quant: spec.quantSrc, slew: spec.slewSrc, tdi: spec.tdiSrc },
   };
 }
 

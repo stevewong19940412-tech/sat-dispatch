@@ -59,7 +59,7 @@ async function pbResolveTask(idParam) {
 }
 import {
   normalizeTaskStrips, computeVisibleWindows, forecastCloud, cloudEffective,
-  applyConstraints, getCapability, haversineKm, DEFAULT_CAPS,
+  applyConstraints, getCapability, haversineKm,
 } from "./candidate_calc.mjs";
 import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
@@ -999,7 +999,7 @@ export function validateCommands(commands, sat, plan) {
     const imgCenter = imgStart + imgCmd.duration * 1000 / 2;
     if (!plan.imgWinStart || !plan.imgWinEnd) {
       // 结构化驳回：给出「差多少才够拍」的数值诊断（幅宽/最近距离/侧摆/需要的高度）
-      // 数据源：candidates 落库的 minDistKm（精确 TCA 距离）+ DEFAULT_CAPS 型号幅宽
+      // 数据源：candidates 落库的 minDistKm（精确 TCA 距离）+ sat_specs 型号幅宽（官方公开参数）
       const caps = getCapability(sat);
       const halfKm = caps.swathKm / 2;
       const minKm = plan.minDistKm ?? null;

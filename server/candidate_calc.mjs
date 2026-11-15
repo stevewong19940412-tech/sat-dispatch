@@ -3,6 +3,7 @@
 // 确定性计算，全部可复算。轨道预报基于底座 SGP4。
 import * as satellite from "satellite.js";
 import { db } from "./db.mjs";
+import { getSatSpec, getCapabilityBySpec } from "./sat_specs.mjs";
 
 const EARTH_R = 6371;
 
@@ -217,10 +218,11 @@ export function computeVisibleWindows(sat, strip, opts) {
     // TCA 时刻精确侧摆（弧长/地心角模型）
     const slew = Math.atan(tcaD / altKm) * 180 / Math.PI;
     // 成像覆盖窗：传感器幅宽半宽内才算"能拍到"（直控口径）。
-    // 幅宽按型号真实配置查 DEFAULT_CAPS（GAOFEN 14km / JILIN 12km / SUPERVIEW 12km / ZIYUAN 30km / FENGYUN 500km…）
-    const series = Object.keys(DEFAULT_CAPS).find(k => sat.name?.toUpperCase().startsWith(k)) ?? '';
-    const caps = series ? DEFAULT_CAPS[series] : null;
-    const footprintHalfKm = (caps?.swathKm ?? 14) / 2;
+    // 幅宽/分辨率统一取型号规格表 sat_specs.mjs（2026-11-15 按官方公开参数校正，逐条记出处）。
+    // 历史坑：曾用 startWith 前缀匹配 DEFAULT_CAPS，GAOFEN-9/11/13 全落到 GAOFEN 统配 14km，
+    // JILIN-1 KUANFU 落到 JILIN 统配 12km，导致大量中宽幅星被误判"拍不到"。
+    const spec = getSatSpec(sat);
+    const footprintHalfKm = spec.swathKm / 2;
     let imgWinStart = null, imgWinEnd = null;
     for (const p of fine) {
       const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
@@ -331,6 +333,8 @@ export function applyConstraints(candidate, task, sat, cap) {
 }
 
 // 默认能力目录（公司×系列）
+// ⚠️ 2026-11-15 起不是覆盖判定的取值源，见 sat_specs.mjs。此表仅作为历史兜底常量保留，
+// 其中 JILIN 12km / GAOFEN 统一 14km 的口径已被官方公开参数取代（GAOFEN-1 60km / GAOFEN-6 90km 等）。
 export const DEFAULT_CAPS = {
   'JILIN': { resolution: 0.75, swathKm: 12, slewLimitDeg: 45, spectral: '可见光' },
   'GAOFEN': { resolution: 0.8, swathKm: 14, slewLimitDeg: 35, spectral: '可见光' },
@@ -346,13 +350,9 @@ export const DEFAULT_CAPS = {
 };
 
 export function getCapability(sat) {
-  const N = sat.name.toUpperCase();
-  for (const [key, cap] of Object.entries(DEFAULT_CAPS)) {
-    if (N.includes(key)) return { ...cap };
-  }
-  // 默认按类别给
-  if (sat.category === 'imaging') return { resolution: 1.0, swathKm: 12, slewLimitDeg: 40, spectral: '可见光' };
-  if (sat.category === 'recon') return { resolution: 1.0, swathKm: 10, slewLimitDeg: 40, spectral: 'SAR-C' };
-  if (sat.category === 'weather') return { resolution: 500, swathKm: 500, slewLimitDeg: 10, spectral: '多光谱' };
-  return { resolution: 30, swathKm: 100, slewLimitDeg: 20, spectral: '多光谱' };
+  // 统一由型号规格表提供（single source of truth），返回结构与历史保持兼容
+  return getCapabilityBySpec(sat);
 }
+
+// 历史常量保留导出：仅作兜底与文档参考，覆盖判定已不使用
+export const DEFAULT_CAPS_LEGACY = DEFAULT_CAPS;
