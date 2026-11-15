@@ -3,9 +3,9 @@
 智能体通过 Bash 直接调用：dispatch <子命令> [参数]
 数据来源：调度系统 API（127.0.0.1 内部）与 PocketBase 实例
 """
-import json, os, sys, urllib.parse, urllib.request
+import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 7  # v7: q() 从 POST /_sql(SQL直查) 重写为 PocketBase REST(filter翻译)，_sql 已随 PB 迁移弃用（v6=批量建单 v4=补齐 sats/companies+--help v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 9  # v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -99,6 +99,29 @@ def _pb_auth():
     return _pb_token
 
 def _pb_api(path):
+    # 双通道：优先走应用侧只读代理 /dispatch/_pbq（线上 PB 仅容器内可见，外部 CLI 直连会 refused）；
+    # 仅当明确设置了 DISPATCH_PB_URL（沙盒同机演练）或代理不可用时才直连 PB。
+    if path.startswith("/api/collections/"):
+        m = re.match(r"/api/collections/(\w+)/records\??(.*)", path)
+        if m and APP_BASE:
+            table, qs = m.group(1), m.group(2)
+            params = urllib.parse.parse_qs(qs)
+            q = urllib.parse.urlencode({k: v[0] for k, v in params.items() if k in ("filter","sort","perPage","expand","fields","page")})
+            req = urllib.request.Request(APP_BASE + f"/api/dispatch/_pbq?table={table}" + (("&"+q) if q else ""),
+                                         headers=_headers())
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    die("查询通道未就绪：线上版本尚无 /dispatch/_pbq 代理（需部署 CLI v8 配套服务端）。"
+                        "请等待部署完成后重试，或由运维执行 blade app deploy up。")
+                if e.code not in (400,):
+                    detail = e.read().decode(errors="replace")[:300]
+                    die(f"PB 查询失败(代理): {path} → HTTP {e.code}: {detail}")
+            except Exception as e2:
+                die(f"查询通道不可达：代理网络异常({e2})，且 PB 直连在本环境不可用（PB 仅容器内 127.0.0.1:8091）。"
+                    "请检查 DISPATCH_APP_BASE 是否指向线上应用。")
     req = urllib.request.Request(PB_URL + path, headers={"Authorization": _pb_auth()})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -408,12 +431,35 @@ def main():
         except Exception:
             die("参数必须是 JSON 对象，如: dispatch create '{\"taskName\":\"...\",\"lat\":39.9,...}'")
         missing = []
+        recommend_hint = None
+        # 面目标（polygon/area）用 geom.coords，点目标用 lat/lon —— 两种都合法，不能互相强求
+        _gt = (body.get("geomType") or "point").lower()
+        _geom = body.get("geom") if isinstance(body.get("geom"), dict) else None
+        _is_poly = _gt in ("polygon", "area") or (_geom and isinstance(_geom.get("coords"), list))
         if not body.get("targetName"): missing.append("目标名称(targetName)")
-        if body.get("lat") is None or body.get("lon") is None: missing.append("目标坐标(lat/lon)")
+        if _is_poly:
+            if not (_geom and isinstance(_geom.get("coords"), list) and len(_geom["coords"]) >= 3):
+                missing.append("面目标顶点(geom.coords，至少3个[lat,lon])")
+            # 多边形没有单一 lat/lon 时，用顶点均值作为推荐接口的参考点
+            if body.get("lat") is None or body.get("lon") is None:
+                if _geom and isinstance(_geom.get("coords"), list) and _geom["coords"]:
+                    try:
+                        _cs = _geom["coords"]
+                        body["lat"] = sum(float(c[0]) for c in _cs) / len(_cs)
+                        body["lon"] = sum(float(c[1]) for c in _cs) / len(_cs)
+                    except Exception:
+                        pass
+        else:
+            if body.get("lat") is None or body.get("lon") is None: missing.append("目标坐标(lat/lon)")
         if not body.get("obsType"):
-            rec = api_req("/recommend", "POST", {k: body.get(k) for k in ("targetName","lat","lon","resolution","timelinessHours","windowStart","windowEnd") if body.get(k) is not None})
+            # 推荐接口失败不能拖垮建单：缺字段校验必须始终能返回 needClarify
+            try:
+                recommend_hint = api_req("/recommend", "POST", {
+                    k: body.get(k) for k in ("targetName","lat","lon","resolution","timelinessHours","windowStart","windowEnd")
+                    if body.get(k) is not None})
+            except Exception:
+                recommend_hint = None
             missing.append("观测类型(obsType: optical/sar)")
-            recommend_hint = rec
         if not body.get("resolution"): missing.append("分辨率米数(resolution)")
         if not body.get("windowStart") or not body.get("windowEnd"): missing.append("时间窗(windowStart/windowEnd)")
         if missing:
@@ -426,7 +472,17 @@ def main():
                                 "其余缺项一并合并追问")
             out(resp)
             return
-        r = api_req("/tasks", "POST", {**body, "source": "对话下单", "geomType": "point", "geom": {"lat": body["lat"], "lon": body["lon"]}})
+        if recommend_hint:
+            body["observedRecommendation"] = recommend_hint.get("recommended")
+        # geomType 必须尊重调用方：面目标传 polygon/area + geom.coords 时若硬写成 point，
+        # 会把整个区域静默降级成"只拍中心一个点"，覆盖范围严重失真（历史 bug）。
+        if _is_poly:
+            _payload = {**body, "source": "对话下单", "geomType": "polygon",
+                        "geom": {"coords": _geom["coords"]}}
+        else:
+            _payload = {**body, "source": "对话下单", "geomType": "point",
+                        "geom": {"lat": body["lat"], "lon": body["lon"]}}
+        r = api_req("/tasks", "POST", _payload)
         out({"ok": True, "task": {"id": r["id"], "taskNo": r["taskNo"], "taskName": r["taskName"], "status": r["status"]},
              "next": f"已进入待派单；建议执行 dispatch candidates {r['id']}"})
 
@@ -485,11 +541,9 @@ def main():
              "failedCount": r.get("failedCount"), "confirmedCount": confirmed if confirm else None,
              "created": r.get("created"), "failed": r.get("failed")})
 
-    elif cmd == "dispatch":
-        die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
-            "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
-        lat, lon = float(rest[0]), float(rest[1])
-        days = int(rest[2]) if len(rest) > 2 else 3
+    elif cmd == "weather" and len(sys.argv) >= 4:
+        lat, lon = float(sys.argv[2]), float(sys.argv[3])
+        days = int(sys.argv[4]) if len(sys.argv) > 4 else 3
         days = max(1, min(days, 3))  # open-meteo 逐小时预报上限3天
         url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
                f"&hourly=cloud_cover&timezone=UTC&forecast_days={days}")
@@ -515,6 +569,10 @@ def main():
             "云量最低时段": {"起": best[1], "止": best[2], "均云量%": best[0]} if best else None,
             "逐小时": [{"时间UTC": t, "云量%": c} for t, c in hours],
         })
+
+    elif cmd == "dispatch":
+        die("派单已在工程侧禁用：派单方式（派给公司/直控）只能由用户在调度工作台人工操作，AI 无派单权限。"
+            "请到调度工作台任务详情使用「派给公司」/「生成直控任务指令」按钮。")
 
     elif cmd == "delete" and arg:
         tid = int(arg)
