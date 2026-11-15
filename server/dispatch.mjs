@@ -57,7 +57,7 @@ async function pbResolveTask(idParam) {
   return s ? { rid: s, oldId: null } : null;
 }
 import {
-  normalizeTaskStrips, planTaskArea, computeVisibleWindows, forecastCloud, cloudEffective,
+  normalizeTaskStrips, planTaskArea, computeVisibleWindows, coarseWindowsAllStrips, refineStripWindows, forecastCloud, cloudEffective,
   applyConstraints, getCapability, haversineKm,
 } from "./candidate_calc.mjs";
 import { forecastCloudReal } from "./cloud_forecast.mjs";
@@ -502,8 +502,15 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     const cap = getCapability(sat);
     const company = sat.operator || sat.country;
     let anyInserted = false;
+    // 一次轨迹采样 → 该星对所有条带的粗窗（性能关键）：
+    // 旧写法每条带各跑一遍 7 天轨道采样，21 条带 × 131 星 会重复 2751 次，
+    // 单任务耗时 >400s 直接拖死请求。
+    const coarseByStrip = coarseWindowsAllStrips(sat, strips, opts);
+    if (!coarseByStrip.size) continue;
     for (const strip of strips) {
-      const windows = computeVisibleWindows(sat, strip, opts);
+      const coarseList = coarseByStrip.get(strip.idx);
+      if (!coarseList || !coarseList.length) continue;
+      const windows = refineStripWindows(sat, strip, coarseList, opts);
       for (const w of windows.slice(0, 3)) { // 每条带最多3个窗口
         const overpass = new Date(w.overpass);
         const { cloud, source: cloudSrc } = await forecastCloudReal(strip.lat, strip.lon, overpass, leadDays);

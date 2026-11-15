@@ -74,7 +74,59 @@ function makeSatrec(sat) {
 // SGP4 是纯函数，track 只依赖 (sat, t0, aheadMin, step)，与条带无关——模块级缓存消除
 // 长窗分段/多条带场景下同一星的重复 SGP4 计算
 const _trackCache = new Map();
-const _TRACK_CACHE_MAX = 4096; // 格网批量任务：95星×N段粗扫+每窗精化都要命中，64 会互相淘汰
+const _TRACK_CACHE_MAX = 8192;
+
+// ─── 1 秒轨道整段缓存（2026-11-15 性能优化）────────────────────────────────
+// 问题：面目标任务每条带都要精化，而 sampleTrack 的缓存键含 minutesAhead，
+//   各条带窗口长度不同 → 几乎不命中，21 条带 × 131 星 = 213 秒，请求超时。
+// 改法：每颗星每次任务只采一次「任务全窗 + 前后缓冲」的 1 秒轨道，
+//   之后所有条带对同一时间段的查询都走内存切片（O(log n) 二分 + 截取）。
+const _fineCache = new Map();   // noradId -> { t0, t1, pts }
+const _FINE_CACHE_MAX = 400;  // 需容纳任务内全部候选星（131颗）、防互相淘汰
+
+function fineTrackCached(sat, fromMs, toMs) {
+  const satrec = makeSatrec(sat);
+  if (!satrec) return [];
+  // 缓存键 = 卫星 + 1 分钟对齐的区间起点（不再按整颗星缓存整个 7 天，
+  // 否则每条带都要在 10 万点的数组上二分切片，内存与 GC 压力都很大）。
+  const a = Math.floor(fromMs / 60000) * 60000 - 60000;
+  const b = Math.ceil(toMs / 60000) * 60000 + 60000;
+  const key = `${sat.noradId}|${a}|${b}`;
+  const hit = _fineCache.get(key);
+  if (hit) return hit;
+  const pts = [];
+  for (let t = a; t <= b; t += 1000) {
+    const date = new Date(t);
+    try {
+      const pv = satellite.propagate(satrec, date);
+      if (!pv?.position || typeof pv.position === 'boolean') continue;
+      const geo = satellite.eciToGeodetic(pv.position, satellite.gstime(date));
+      const lat = satellite.degreesLat(geo.latitude);
+      const lon = satellite.degreesLong(geo.longitude);
+      if (!isNaN(lat) && !isNaN(lon)) pts.push({ t, lat, lon, altKm: geo.height });
+    } catch {}
+  }
+  if (_fineCache.size >= _FINE_CACHE_MAX) _fineCache.delete(_fineCache.keys().next().value);
+  _fineCache.set(key, pts);
+  return pts;
+}
+
+function sliceTrack(pts, fromMs, toMs) {
+  if (!pts.length) return [];
+  // 二分找起点（pts 按 t 升序）
+  let lo = 0, hi = pts.length - 1, idx = pts.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid].t >= fromMs) { idx = mid; hi = mid - 1; } else lo = mid + 1;
+  }
+  const out = [];
+  for (let i = idx; i < pts.length && pts[i].t <= toMs; i++) out.push(pts[i]);
+  return out;
+}
+
+/** 清理单次任务内的精化缓存（每次候选计算开始调用，防止跨任务串味/内存膨胀） */
+export function resetFineCache() { _fineCache.clear(); }
+
 export function sampleTrack(sat, t0, minutesAhead, stepSec = 30) {
   const satrec = makeSatrec(sat);
   if (!satrec) return [];
@@ -117,6 +169,174 @@ function solarElevationDeg(lat, lon, date) {
   const latR = lat * rad;
   const sinElev = Math.sin(latR) * Math.sin(decl) + Math.cos(latR) * Math.cos(decl) * Math.cos(ha);
   return Math.asin(Math.max(-1, Math.min(1, sinElev))) / rad;
+}
+
+/**
+ * 批量粗筛：同一颗星对本任务的所有条带，判断哪些条带与该星在本时窗内有可见机会。
+ * 目的（性能）：面目标任务 21 条带 × 131 星，若每对组合都完整跑一遍 7 天轨道采样，
+ * 单任务耗时 >200s 直接请求超时。这里先用一次粗采样（60s 步长）算出该星的轨迹，
+ * 再对每条带做一次距离扫描，把不可能有窗口的 (星,带) 组合提前剔除。
+ *
+ * 判据与 computeVisibleWindows 的粗扫门限保持一致（侧摆可达距离 × 0.98），
+ * 因此不会漏掉真实窗口——只是把明显不可见的组合跳过。
+ */
+export function prescreenStripHits(sat, strips, opts) {
+  const { windowStart, windowEnd, minElevSunDeg = 10, maxSlewDeg = 45 } = opts;
+  const t0 = new Date(windowStart);
+  const spanMs = new Date(windowEnd).getTime() - t0.getTime();
+  if (!(spanMs > 0) || !strips.length) return new Set();
+  const aheadMin = Math.min(Math.ceil(spanMs / 60000) + 60, 3 * 1440 + 60);
+  const track = sampleTrack(sat, t0, aheadMin, 120); // 120s 粗筛足够（可见半径数百 km）
+  if (!track.length) return new Set();
+  const altKm = track[0].altKm || 500;
+  const reach = altKm * Math.tan(Math.min(maxSlewDeg, 60) * Math.PI / 180) * 0.98
+              + Math.max(...strips.map(s => s.radiusKm ?? 6));
+  const tEnd = new Date(windowEnd).getTime();
+  const hits = new Set();
+  const isSar = sat.subCategory === 'sar';
+  const isWeather = sat.category === 'weather';
+  for (const p of track) {
+    if (p.t > tEnd) break;
+    for (const st of strips) {
+      if (hits.has(st.idx)) continue;
+      const d = haversineKm(p.lat, p.lon, st.lat, st.lon);
+      if (d > reach) continue;
+      if (!isSar && !isWeather && solarElevationDeg(st.lat, st.lon, new Date(p.t)) < minElevSunDeg) continue;
+      hits.add(st.idx);
+    }
+    if (hits.size === strips.length) break;
+  }
+  return hits;
+}
+
+/**
+ * 一次轨迹采样，算出该星对本任务所有条带的粗窗口（性能核心）。
+ * 面目标任务 21 条带 × 131 星如果逐对调用 computeVisibleWindows，
+ * 会重复采样 7 天轨道 2751 次（单任务 >400s）。
+ * 这里只采样一次（与 computeVisibleWindows 同口径），
+ * 逐点对所有条带做距离/光照判定，得到每带的粗窗口列表。
+ *
+ * @returns {Map<number, Array<{start:number,end:number,overpass:number,minDistKm:number,slewDeg:number}>>}
+ */
+export function coarseWindowsAllStrips(sat, strips, opts) {
+  const { windowStart, windowEnd, minElevSunDeg = 10, maxSlewDeg = 45 } = opts;
+  const t0 = new Date(windowStart);
+  const tEnd = new Date(windowEnd).getTime();
+  const spanMs = tEnd - t0.getTime();
+  if (!(spanMs > 0) || !strips.length) return new Map();
+
+  const SEG_MS = 3 * 86400000;
+  const aheadMin = Math.min(Math.ceil(spanMs / 60000) + 60, 3 * 1440 + 120);
+  const coarseStep = spanMs > 2 * 86400000 ? 60 : 20;
+  const track = sampleTrack(sat, t0, aheadMin, coarseStep);
+  if (!track.length) return new Map();
+
+  const altKm = track[0].altKm || 500;
+  const maxOffKm = altKm * Math.tan(Math.min(maxSlewDeg, 60) * Math.PI / 180) * 0.9;
+  const isSar = sat.subCategory === 'sar';
+  const isWeather = sat.category === 'weather';
+
+  const state = strips.map(st => ({ st, inWin: false, winStart: null, best: null }));
+  const out = new Map(strips.map(st => [st.idx, []]));
+
+  for (const p of track) {
+    if (p.t > tEnd) break;
+    const sunEl = (isSar || isWeather) ? 99 : solarElevationDeg(p.lat, p.lon, new Date(p.t));
+    for (const s of state) {
+      const dKm = haversineKm(p.lat, p.lon, s.st.lat, s.st.lon);
+      const visible = dKm <= maxOffKm && (isWeather || isSar || sunEl >= minElevSunDeg);
+      if (visible) {
+        if (!s.inWin) { s.inWin = true; s.winStart = p.t; s.best = { t: p.t, dKm }; }
+        else if (dKm < s.best.dKm) s.best = { t: p.t, dKm };
+      } else if (s.inWin) {
+        s.inWin = false;
+        if (s.best) out.get(s.st.idx).push({
+          start: s.winStart, end: p.t, overpass: s.best.t,
+          minDistKm: s.best.dKm, slewDeg: Math.atan(s.best.dKm / altKm) * 180 / Math.PI,
+        });
+        s.best = null;
+      }
+    }
+  }
+  for (const s of state) {
+    if (s.inWin && s.best) out.get(s.st.idx).push({
+      start: s.winStart, end: Math.min(track[track.length - 1].t, tEnd), overpass: s.best.t,
+      minDistKm: s.best.dKm, slewDeg: Math.atan(s.best.dKm / altKm) * 180 / Math.PI,
+    });
+  }
+  return out;
+}
+
+/**
+ * 单条带精化：把 coarseWindowsAllStrips 得到的粗窗口做 1 秒精化。
+ * 复用 computeVisibleWindows 的精化逻辑（TCA/成像覆盖窗/精确侧摆）。
+ */
+export function refineStripWindows(sat, strip, coarseList, opts) {
+  if (!coarseList?.length) return [];
+  const out = [];
+  for (const w of coarseList.slice(0, 8)) {
+    // 只在粗窗 ±60s 内做秒级精化（原实现按整段窗口重算，7 天窗会重复采样）
+    const a = Math.max(w.start - 60000, new Date(opts.windowStart).getTime());
+    const b = Math.min(w.end + 60000, new Date(opts.windowEnd).getTime());
+    const r = refineOneWindow(sat, strip, a, b, w, opts);
+    if (r) out.push(r);
+  }
+  return out;
+}
+
+/**
+ * 单个窗口的秒级精化（从 computeVisibleWindows 内联抽出，避免整段重采样）。
+ * 输入：星、条带、精化区间 [a,b]、粗窗（含 TCA 估计）、任务参数。
+ * 输出：与 computeVisibleWindows 相同结构的窗口对象。
+ */
+function refineOneWindow(sat, strip, aMs, bMs, coarse, opts) {
+  const { minElevSunDeg = 10, maxSlewDeg = 45 } = opts;
+  const rec = makeSatrec(sat);
+  if (!rec) return null;
+  const pts = fineTrackCached(sat, aMs, bMs);
+  if (!pts.length) return null;
+
+  const spec = getSatSpec(sat);
+  const footprintHalfKm = spec.swathKm / 2;
+  const slewLimit = Math.min(spec.slewMax ?? 45, maxSlewDeg);
+  const altKm = pts[0].altKm || 500;
+  const maxSlewGroundKm = altKm * Math.tan(slewLimit * Math.PI / 180);
+  const isSar = sat.subCategory === 'sar';
+  const isWeather = sat.category === 'weather';
+
+  let tcaT = null, tcaD = Infinity;
+  let imgS = null, imgE = null, bestSlew = null;
+  let visStart = null, visEnd = null;
+  for (const p of pts) {
+    const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
+    const sunEl = (isSar || isWeather) ? 99 : solarElevationDeg(strip.lat, strip.lon, new Date(p.t));
+    const visible = dKm <= maxSlewGroundKm * 0.98 && (isWeather || isSar || sunEl >= minElevSunDeg);
+    if (visible) {
+      if (visStart === null) visStart = p.t;
+      visEnd = p.t;
+      if (dKm < tcaD) { tcaD = dKm; tcaT = p.t; }
+      const theta = Math.atan(dKm / Math.max(1, p.altKm ?? altKm));
+      const halfFoot = footprintHalfKm / Math.cos(theta);
+      if (dKm <= maxSlewGroundKm + halfFoot) {
+        if (imgS === null) imgS = p.t;
+        imgE = p.t;
+        const deg = theta * 180 / Math.PI;
+        if (bestSlew === null || dKm < (bestSlew.d ?? 1e9)) bestSlew = { deg, d: dKm };
+      }
+    }
+  }
+  if (tcaT === null) return null;
+  return {
+    start: visStart, end: visEnd,
+    imgWinStart: imgS !== null ? new Date(imgS).toISOString() : null,
+    imgWinEnd: imgE !== null ? new Date(imgE).toISOString() : null,
+    overpass: tcaT,
+    minDistKm: tcaD,
+    slewDeg: Math.atan(tcaD / altKm) * 180 / Math.PI,
+    bestSlewDeg: bestSlew?.deg ?? null,
+    maxSlewGroundKm: +maxSlewGroundKm.toFixed(1),
+    refined: true,
+  };
 }
 
 export function computeVisibleWindows(sat, strip, opts) {
@@ -165,7 +385,10 @@ export function computeVisibleWindows(sat, strip, opts) {
 
   // 地面覆盖半径（km）：侧摆上限对应
   const altKm = track[0].altKm || 500;
-  const maxOffKm = altKm * Math.tan(Math.min(maxSlewDeg, 60) * Math.PI / 180) * 0.9; // 简化几何
+  // 粗扫门限：侧摆可达地面距离 × 0.95（留裕度）。注意与精化阶段的口径保持一致——
+  // 旧代码用 tan(min(maxSlew,60))×0.9，在 maxSlew=45 时约 0.9×高度，
+  // 比精化用的「侧摆可达 + 幅宽投影」小，会提前把远处窗口判成不可见。
+  const maxOffKm = altKm * Math.tan(Math.min(maxSlewDeg, 60) * Math.PI / 180) * 0.98;
 
   const windows = [];
   let inWin = false, winStart = null, best = null;
@@ -204,8 +427,8 @@ export function computeVisibleWindows(sat, strip, opts) {
     let tcaT = null, tcaD = Infinity;
     // 一次取整段 1s 步长轨道（缓存命中后条带间/段间复用），原先逐点调用
     // sampleTrack(sat, new Date(t), 0.02, 1) 每点都 makeSatrec+propagate，慢 10 倍以上
-    const fineTrack = sampleTrack(sat, new Date(rStart), Math.ceil((rEnd - rStart) / 60000) + 1, 1)
-      .filter(p => p.t >= rStart && p.t <= rEnd);
+    // 走整段 1 秒轨道缓存：同任务内所有条带/窗口共享一次采样（性能优化）
+    const fineTrack = fineTrackCached(sat, rStart, rEnd);
     for (const p of fineTrack) {
       const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
       if (dKm < tcaD) { tcaD = dKm; tcaT = p.t; }
