@@ -461,9 +461,6 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     maxSlewDeg: task.maxSlewDeg || 45, // PB number 未设读回 0（SQLite 有 DEFAULT 45，PB 没有）——0 会让可见半径归零、候选全空
     minElevSunDeg: 10,
   };
-  const strips = normalizeTaskStrips(task, 12);
-  // 区域规划元信息（尺度/策略/方位角/条带统计）——用于向用户说明"测哪儿、怎么拆的"
-  const areaPlan = task.geomType === 'point' ? null : planTaskArea(task, 12);
   const tCreated = new Date(task.createdAt);
 
   // 候选卫星范围：观测类型匹配的卫星（SAR任务只看SAR卫星，反之光学）
@@ -476,6 +473,29 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   // 历史行为：仅应急任务筛中国星，普通任务把 Sentinel/Pleiades/WorldView 等外国星也纳入候选，
   // 导致候选清单一堆境外星、且它们无法走国内测控与派单交付。
   const scope = allSats.filter(s => s.country === '中国');
+
+  // ── 条带宽度自适应（2026-11-15 修复：固定 12km 会显著高估条带数）────────────
+  // 旧实现一律按 12km 幅宽切条带：30×30km 区域切成 4 条带，
+  // 而实际可用的 GF-1（60km 幅宽）一颗就够 1 条带。
+  // 新做法：取「满足任务分辨率要求的卫星里最大幅宽」，作为切分幅宽，
+  // 上限不超过区域短边的 1.2 倍（避免幅宽远大于目标导致过度覆盖）。
+  const taskRes = Number(task.resolution) || 2;
+  let swathForPlan = 12;
+  try {
+    const caps = scope.map(s => getCapability(s)).filter(c => c.resolution <= taskRes * 1.2);
+    const maxSwath = caps.length ? Math.max(...caps.map(c => c.swathKm)) : 12;
+    const geomObj = JSON.parse(task.geom ?? "{}");
+    if (task.geomType !== 'point' && Array.isArray(geomObj.coords)) {
+      const lats = geomObj.coords.map(c => c[0]), lons = geomObj.coords.map(c => c[1]);
+      const spanKm = Math.min(
+        Math.abs(Math.max(...lats) - Math.min(...lats)) * 111,
+        Math.abs(Math.max(...lons) - Math.min(...lons)) * 111 * Math.cos(geomObj.coords[0][0] * Math.PI / 180)
+      );
+      swathForPlan = Math.max(12, Math.min(maxSwath, Math.max(12, spanKm * 1.2)));
+    }
+  } catch {}
+  const strips = normalizeTaskStrips(task, swathForPlan);
+  const areaPlan = task.geomType === 'point' ? null : planTaskArea(task, swathForPlan);
 
   // PB 迁移：旧候选先清后写（batch 原子删除），新候选用 pbBatch 批量插入
   const oldCands = await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "id" });
@@ -537,6 +557,7 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           minDistKm: Math.round(w.minDistKm * 10) / 10,
           imgWinStart: w.imgWinStart ? new Date(w.imgWinStart).toISOString() : "",
           imgWinEnd: w.imgWinEnd ? new Date(w.imgWinEnd).toISOString() : "",
+          stripCoverage: w.stripCoverage ?? 1,
         } });
         if (pass) {
           // 每条带的通过候选不超过配额；超配额仍可落库用于诊断，但不计入通过数
@@ -577,17 +598,26 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       }
     }
     const topReasons = Object.entries(reasons).sort((a, b) => b[1] - a[1]);
+    // 区分两种 0 候选：
+    // ① diagRows 有行但全被约束筛掉（云量/分辨率/侧摆不满足）
+    // ② diagRows 为空——粗筛阶段就没有任何「星-条带」有可见机会（时窗内无过顶/夜间/超范围）
+    const noPassAny = diagRows.length === 0;
     planningDiagnosis = {
       level: 'NO_CANDIDATE',
-      summary: `共解算 ${diagRows.length} 条候选记录，全部被约束筛除——当前参数下没有任何一条可执行`,
+      summary: noPassAny
+        ? `时窗内 ${scope.length} 颗候选星对 ${strips.length} 条带均无可见过顶——不是约束太严，而是这个时间窗几何上拍不到`
+        : `共解算 ${diagRows.length} 条候选记录，全部被约束筛除——当前参数下没有任何一条可执行`,
       attribution: topReasons.length
         ? `主要筛除原因：${topReasons.slice(0, 3).map(([k, v]) => `${k}×${v}`).join('、')}`
-        : '时窗内无过顶（可能落在重访间隙、夜间，或目标超出可见范围）',
-      suggestions: [
-        '按上面的筛除原因针对性放宽（云量上限 / 分辨率档位 / 时间窗长度）',
-        '或改用 SAR（不受云量与光照限制）',
-        '或扩大时间窗至 ≥7 天，给更多过顶机会',
-      ],
+        : `时窗内无可见过顶：${strips.length} 条带 × ${scope.length} 颗星均无机会（重访间隙、夜间光照不足，或目标超出侧摆可达范围）`,
+      preScreenEmpty: noPassAny,
+      suggestions: noPassAny
+        ? ['把时间窗扩大到 ≥3 天再算（当前窗太窄，落在重访间隙里）',
+           '若必须在该时刻成像，改用 GEO 凝视星或 SAR（不受光照限制）',
+           '确认目标坐标是否正确（可先用 dispatch weather <lat> <lon> 核实该点云量/光照）']
+        : ['按上面的筛除原因针对性放宽（云量上限 / 分辨率档位 / 时间窗长度）',
+           '或改用 SAR（不受云量与光照限制）',
+           '或扩大时间窗至 ≥7 天，给更多过顶机会'],
       reasonBreakdown: reasons,
     };
   } else if (passingRows.length > 0 && coverableRows.length === 0) {
@@ -634,11 +664,14 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       const si = r.stripIdx ?? 0;
       if (!byStrip.has(si) || (r.minDistKm != null && r.minDistKm < (byStrip.get(si).minDistKm ?? 1e9))) {
         byStrip.set(si, { idx: si, satName: r.satName, overpass: r.overpassTime, minDistKm: r.minDistKm,
-                          slewDeg: r.slewDeg, imgWin: !!(r.imgWinStart && r.imgWinEnd) });
+                          slewDeg: r.slewDeg, imgWin: !!(r.imgWinStart && r.imgWinEnd),
+                          stripCoverage: r.stripCoverage ?? 1 });
       }
     }
     // 只有「通过约束且幅宽/侧摆可覆盖」才算真正覆盖该条带
-    const assigned = [...byStrip.values()].filter(a => a.imgWin);
+    // 只有「幅宽可覆盖 且 条带完整度 ≥0.99」才算该条带真正被覆盖，
+    // 避免窄时窗下"只扫到条带中段"被当成全覆盖。
+    const assigned = [...byStrip.values()].filter(a => a.imgWin && (a.stripCoverage ?? 1) >= 0.99);
     coveragePlan = summarizeCoveragePlan(areaPlan, assigned);
     if (coveragePlan.coveragePct < 100) {
       coverageWarning = {
@@ -787,9 +820,18 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   // 其余 20 条带无人承接却把任务置为"已派发"（静默丢覆盖）。
   // 新实现：每个「有可用候选」的条带各出一张订单（各自选最优候选），
   //   未被覆盖的条带明确列在响应里，任务状态按是否全覆盖区分。
-  const stripGroups = new Map(); // stripIdx -> 该条带的最优候选（按 rank）
+  // rankings 表本身没有 stripIdx 字段（它只有 task/candidate/rank/Q/R/C/S），
+  // 条带号在 candidates 表里。必须按 candidateId 回查，否则所有候选都会被归到第 1 条带，
+  // 导致 21 条带的任务只出 1 张订单（P0-3 复测未通过的直接原因）。
+  const candRows = await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "id,oldId,stripIdx" });
+  const stripById = new Map();
+  for (const c of candRows) {
+    stripById.set(c.id, c.stripIdx ?? 1);
+    if (c.oldId != null) stripById.set(c.oldId, c.stripIdx ?? 1);
+  }
+  const stripGroups = new Map(); // stripIdx -> 该条带的最优候选（按 rank 顺序取第一个）
   for (const rk of ranking) {
-    const si = rk.stripIdx ?? 1;
+    const si = stripById.get(rk.candidateId) ?? stripById.get(rk.candidate) ?? rk.stripIdx ?? 1;
     if (!stripGroups.has(si)) stripGroups.set(si, rk);
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))

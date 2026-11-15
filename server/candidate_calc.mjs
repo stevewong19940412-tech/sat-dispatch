@@ -326,7 +326,36 @@ function refineOneWindow(sat, strip, aMs, bMs, coarse, opts) {
     }
   }
   if (tcaT === null) return null;
+
+  // ── 条带完整性判定（2026-11-15 修复：覆盖判定只看中心点的静默失真）──────────
+  // 一个条带是一条 12km 宽、可能上百 km 长的带。旧判定只看「卫星能否拍到条带中心」，
+  // 于是极窄时窗下也能"每条带都有候选"，coveragePct 永远 100%，
+  // 但实际沿轨迹方向可能只扫到中间一小段，两端没拍到。
+  // 这里额外检查：该次过顶期间，卫星星下点是否覆盖条带的首尾两端附近。
+  let stripCoverage = 1.0;
+  if (Array.isArray(strip.start) && Array.isArray(strip.end) && (strip.lengthKm ?? 0) > 2) {
+    const reachS = maxSlewGroundKm + footprintHalfKm / Math.cos(Math.min(slewLimit, 60) * Math.PI / 180);
+    let hitS = false, hitE = false;
+    let minDS = Infinity, minDE = Infinity;
+    for (const p of pts) {
+      const dS = haversineKm(p.lat, p.lon, strip.start[0], strip.start[1]);
+      const dE = haversineKm(p.lat, p.lon, strip.end[0], strip.end[1]);
+      if (dS < minDS) minDS = dS;
+      if (dE < minDE) minDE = dE;
+      if (dS <= reachS) hitS = true;
+      if (dE <= reachS) hitE = true;
+      if (hitS && hitE) break;
+    }
+    const hits = (hitS ? 1 : 0) + (hitE ? 1 : 0);
+    // 中心必然被覆盖（否则前面就返回 null），端点命中数决定完整度：2/2=100%，1/2=60%，0/2=35%
+    stripCoverage = hits === 2 ? 1.0 : hits === 1 ? 0.6 : 0.35;
+    if (hits < 2) {
+      stripCoverage = Math.min(stripCoverage, 0.999); // 明确标记为"非完整覆盖"
+    }
+  }
+
   return {
+    stripCoverage,
     start: visStart, end: visEnd,
     imgWinStart: imgS !== null ? new Date(imgS).toISOString() : null,
     imgWinEnd: imgE !== null ? new Date(imgE).toISOString() : null,
