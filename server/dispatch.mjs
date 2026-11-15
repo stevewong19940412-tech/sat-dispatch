@@ -764,6 +764,9 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
         satName: c.satName, company: c.company, satNoradId: c.satNoradId, overpassTime: c.overpassTime,
         windowStart: c.windowStart, windowEnd: c.windowEnd, availability: c.availability,
         minDistKm: c.minDistKm, imgWinStart: c.imgWinStart, imgWinEnd: c.imgWinEnd, sunElDeg: c.sunElDeg,
+        // 条带号直接取自展开的候选记录（rankings 表本身没有该字段，靠回查容易失败）
+        stripIdx: c.stripIdx ?? 1,
+        stripCoverage: c.stripCoverage ?? 1,
       };
     })
     .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
@@ -831,7 +834,8 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   }
   const stripGroups = new Map(); // stripIdx -> 该条带的最优候选（按 rank 顺序取第一个）
   for (const rk of ranking) {
-    const si = stripById.get(rk.candidateId) ?? stripById.get(rk.candidate) ?? rk.stripIdx ?? 1;
+    // 优先用 ranking 映射时带出的 stripIdx（来自 expand.candidate），回查仅作兜底
+    const si = rk.stripIdx ?? stripById.get(rk.candidateId) ?? 1;
     if (!stripGroups.has(si)) stripGroups.set(si, rk);
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
