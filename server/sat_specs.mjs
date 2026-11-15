@@ -157,8 +157,29 @@ export const SAT_SPECS = [
     src: '海洋系列（typical）' },
   { re: /^FENGYUN/i, key: 'FY', resM: 500, swathKm: 500, slewMax: 10, cat: '气象',
     src: '风云系列（typical）' },
-  { re: /^YAOGAN/i, key: 'YG', resM: 1, swathKm: 30, slewMax: 40, cat: 'SAR',
-    src: '遥感系列（typical）' },
+  // ── 遥感（YAOGAN）系列：必须按子系列细分，光学与 SAR 混编 ──────────────────
+  // 历史坑：曾用一条 ^YAOGAN 通配把所有遥感星判成 SAR，导致遥-30 这类光学星座
+  // 在光学任务里被整体筛掉（"候选里没有中国星"的直接原因之一）。
+  // 遥-30：光学成像星座（0.72m 级，幅宽约 12km 量级）—— 官方未公开完整参数，取典型值
+  { re: /^YAOGAN[-\s]?30/i, key: 'YG-30', resM: 0.72, swathKm: 12, slewMax: 45, cat: '光学',
+    src: '遥感三十号 光学星座（typical：0.72m/12km）' },
+  // 遥-33：立体测绘光学（1:5万测图），幅宽约 50km 量级
+  { re: /^YAOGAN[-\s]?33/i, key: 'YG-33', resM: 2, swathKm: 50, slewMax: 32, cat: '光学',
+    src: '遥感三十三号 立体测绘光学（typical：2m/50km）' },
+  // 遥-3（YAOGAN-3，NORAD 32289）：598km 光学成像，须在通配 SAR 规则前命中
+  { re: /^YAOGAN[-\s]?3(?![0-9])/i, key: 'YG-3', resM: 1, swathKm: 20, slewMax: 40, cat: '光学',
+    src: '遥感三号 光学（typical：1m/20km）' },
+  // 遥-31 / 40 / 43：SAR（C 波段）。必须排在光学规则之前，且允许 "01A/02B" 这类子型号后缀
+  { re: /^YAOGAN[-\s]?(31|40|43)(?![0-9])/i, key: 'YG-SAR', resM: 3, swathKm: 30, slewMax: 40, cat: 'SAR',
+    src: '遥感系列 SAR（typical：3m/30km）' },
+  // 遥-32 / 42 / 12 / 47：光学成像（注意 4 要加边界，避免吞掉 40/43/45/46）
+  { re: /^YAOGAN[-\s]?(32|42|12|47)(?![0-9])/i, key: 'YG-OPT', resM: 1, swathKm: 20, slewMax: 40, cat: '光学',
+    src: '遥感系列光学（typical：1m/20km）' },
+  { re: /^YAOGAN[-\s]?4(?![0-9])/i, key: 'YG-OPT', resM: 1, swathKm: 20, slewMax: 40, cat: '光学',
+    src: '遥感四号 光学（typical：1m/20km）' },
+  // 其余遥感星：类型未明确，按 SAR 保守处理（不误入光学候选）
+  { re: /^YAOGAN/i, key: 'YG', resM: 3, swathKm: 30, slewMax: 40, cat: 'SAR',
+    src: '遥感系列（类型未明确，typical SAR）' },
 ];
 
 // 未收录型号的类别兜底（保守优先：宁小勿大——幅宽估大会让拍不到的任务被放行）

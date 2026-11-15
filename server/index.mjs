@@ -237,5 +237,6 @@ createServer(app).listen(PORT, "0.0.0.0", () => {
     .then(m => m.runSetup({ skipRelHeal: true }))
     .then(() => import("./orbit_heal.mjs"))
     .then(m => m.healOrbitParams())
+    .then(m => m.healSatelliteMeta())
     .catch(e => console.error("[startup] PB 初始化/轨道自愈失败:", e.message));
 });

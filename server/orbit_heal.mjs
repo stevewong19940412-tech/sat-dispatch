@@ -83,3 +83,62 @@ export async function healOrbitParams({ force = false } = {}) {
   }
   return { checked, fixed, skipped };
 }
+
+// ─── 卫星元数据自愈（国家 / 类别）────────────────────────────────────────────
+// 背景：库中存在两类错误标注，会让候选清单混入不该出现的星：
+//   ① 外国卫星被标成"中国"（SENTINEL-3C、LANDSAT 1/2、NOAA 2 等），
+//      一旦收紧"只候中国星"就会漏掉真正的中国星、或错误保留外国星；
+//   ② 遥感（YAOGAN）系列的 subCategory 全挂在 recon_imaging（侦察），
+//      导致遥-30 这类光学星座从未进入光学候选（中国星数量被人为压到 105）。
+// 本函数按系列规则校正，幂等：已是正确值时不写入。
+const COUNTRY_RULES = [
+  [/^LANDSAT|^NOAA|^GOES|^EWS-G|^DMSP|^WORLDVIEW|^GEOEYE|^TERRA$|^AQUA$|^AURA$|^OCO|^SUOMI/, '美国'],
+  [/^SENTINEL/, '欧洲航天局'],
+  [/^METEOSAT|^METOP/, '欧洲气象卫星应用组织'],
+  [/^SWARM|^CRYOSAT|^GOCE/, '欧洲航天局'],
+  [/^PLEIADES|^SPOT/, '法国'],
+  [/^ALOS|^HIMAWARI|^GCOM/, '日本'],
+  [/^GEO-KOMPSAT|^KOMPSAT/, '韩国'],
+  [/^INSAT|^CARTOSAT|^RESOURCESAT/, '印度'],
+  [/^ICEYE/, '芬兰'],
+  [/^ELEKTRO|^METEOR|^ARKTIKA|^COSMOS|^RESURS/, '俄罗斯'],
+  [/^CASSIOPE/, '加拿大'],
+  [/^CYGFM/, '中国'], // 天仪研究院（中国商业 SAR 星座）
+];
+
+// 遥感子系列类型（依公开资料）：光学 / SAR
+const YAOGAN_KIND = [
+  [/^YAOGAN[-\s]?3(?![0-9])/i, 'optical'],
+  [/^YAOGAN[-\s]?30/i, 'optical'],
+  [/^YAOGAN[-\s]?33/i, 'optical'],
+  [/^YAOGAN[-\s]?(32|42|12|47)(?![0-9])/i, 'optical'],
+  [/^YAOGAN[-\s]?4(?![0-9])/i, 'optical'],
+  [/^YAOGAN[-\s]?(31|40|43)(?![0-9])/i, 'sar'],
+];
+
+export async function healSatelliteMeta() {
+  const sats = await pbAll('satellites', { fields: 'id,noradId,name,country,subCategory,category' });
+  const ops = [];
+  for (const s of sats) {
+    const name = String(s.name || '');
+    let country = s.country;
+    for (const [re, co] of COUNTRY_RULES) { if (re.test(name)) { country = co; break; } }
+
+    let sub = s.subCategory, cat = s.category;
+    if (/^YAOGAN/i.test(name)) {
+      for (const [re, kind] of YAOGAN_KIND) {
+        if (re.test(name)) { sub = kind; cat = 'imaging'; break; }
+      }
+    }
+
+    if (country !== s.country || sub !== s.subCategory || cat !== s.category) {
+      ops.push({ id: s.id, data: { country, subCategory: sub, category: cat } });
+    }
+  }
+  for (let i = 0; i < ops.length; i += 20) {
+    await Promise.all(ops.slice(i, i + 20).map((o) => pbUpdate('satellites', o.id, o.data).catch(() => {})));
+  }
+  if (ops.length) console.log(`[meta-heal] 卫星国家/类别已校正 ${ops.length} 颗`);
+  else console.log('[meta-heal] 卫星国家/类别正常，无需修正');
+  return { fixed: ops.length, checked: sats.length };
+}

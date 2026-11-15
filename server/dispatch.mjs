@@ -442,8 +442,10 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     .filter(s => wantSar
       ? s.subCategory === 'sar'
       : ['optical', 'staring', 'hyperspectral'].includes(s.subCategory));
-  // 应急任务只看中国卫星（直控前提：国内测控托管）；普通任务全部
-  const scope = task.isEmergency ? allSats.filter(s => s.country === '中国') : allSats;
+  // 候选范围：默认只取中国卫星（2026-11-15 按业务口径收紧）。
+  // 历史行为：仅应急任务筛中国星，普通任务把 Sentinel/Pleiades/WorldView 等外国星也纳入候选，
+  // 导致候选清单一堆境外星、且它们无法走国内测控与派单交付。
+  const scope = allSats.filter(s => s.country === '中国');
 
   // PB 迁移：旧候选先清后写（batch 原子删除），新候选用 pbBatch 批量插入
   const oldCands = await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "id" });
