@@ -247,7 +247,12 @@ createServer(app).listen(PORT, "0.0.0.0", () => {
   import("./pb_setup.mjs")
     .then(m => m.runSetup({ skipRelHeal: true }))
     .then(() => import("./orbit_heal.mjs"))
-    .then(m => m.healOrbitParams())
-    .then(m => m.healSatelliteMeta())
-    .catch(e => console.error("[startup] PB 初始化/轨道自愈失败:", e.message));
+    // 注意：这里拿到的 m 是 orbit_heal 模块本身；上一版写成链式 then(m => m.healXxx())
+    // 时第二个 then 的 m 已是 healOrbitParams 的返回值，导致 healSatelliteMeta 根本没执行
+    // （错误被 catch 吞掉，表现为"部署了但线上数据没变"）。
+    .then(async (m) => {
+      await m.healOrbitParams();
+      await m.healSatelliteMeta();
+    })
+    .catch(e => console.error("[startup] PB 初始化/数据自愈失败:", e.message));
 });
