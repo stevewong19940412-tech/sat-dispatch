@@ -25,9 +25,13 @@ export const PAYLOAD_SPECS = {
 };
 
 // 按卫星名匹配载荷规格：相机体制取本表，幅宽/分辨率/侧摆取 sat_specs 单一数据源
-export function getPayloadSpec(satName) {
+export function getPayloadSpec(satName, satMeta = null) {
   const key = Object.keys(PAYLOAD_SPECS).find(k => satName?.toUpperCase().startsWith(k));
-  const spec = getSatSpec({ name: satName });
+  // 载荷类型以数据库标注（satMeta.subCategory）为准，名称只用于查参数。
+  // 历史 bug：JILIN GAOFEN OBJECT G 等 SAR 星因名称匹配到 JILIN 光学规则，
+  // 直控时生成 TDI-CCD 光学指令（相机/压缩/量化位全错）。
+  const spec = getSatSpec({ name: satName, subCategory: satMeta?.subCategory, category: satMeta?.category });
+  const isSarSat = satMeta?.subCategory === 'sar' || spec.cat === 'SAR';
   const base = key ? { series: key, ...PAYLOAD_SPECS[key] } : {
     series: 'GENERIC', quantBits: 10, quantSrc: 'typical',
     slewRate: spec.cat === 'SAR' ? 0 : 1.0, slewSrc: 'typical', tdiSrc: 'typical', pixelUm: 10,
@@ -36,8 +40,16 @@ export function getPayloadSpec(satName) {
   };
   // 幅宽/分辨率以型号规格表（官方公开参数）为准，避免与覆盖判定口径不一致。
   // 历史问题：本表曾写 JILIN swathKm=150、DEFAULT_CAPS 写 12，同一型号差 12 倍。
+  // SAR 星强制覆盖为 SAR 参数，避免名称误匹配带来的光学参数
+  if (isSarSat) {
+    base.mode = 'sarStrip';
+    base.camera = 'SAR-C 相控阵';
+    base.tdiSrc = 'n/a(SAR)';
+    base.quantSrc = base.quantSrc || 'typical';
+  }
   return {
     ...base,
+    isSAR: isSarSat,
     gsdPan: spec.resM,
     gsdMs: base.gsdMs ?? Math.max(2, spec.resM * 4),
     swathKm: spec.swathKm,

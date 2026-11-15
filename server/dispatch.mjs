@@ -63,6 +63,7 @@ import {
 import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
+import { summarizeCoveragePlan } from "./strip_planner.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
 import { solarElevationDegFor } from "./solar.mjs";
 
@@ -121,12 +122,26 @@ dispatchApi.post("/order-intake", async (req, res) => {
   // PB 迁移：status 多值用 (status='a'||status='b') 组合，近 2 天在 JS 内存过滤（PB 时间比较不走 SQLite 方言）
   const active = await pbAll("tasks", { filter: "(status='待派单'||status='已派发'||status='已接单')" });
   const twoDaysAgo = Date.now() - 2 * 86400000;
+  // 幂等键（2026-11-15 修复 P0-4）：坐标 + 观测类型 + 分辨率 + 时间窗起点 全部一致才算同一任务。
+  // 旧实现只比坐标（且只对点目标生效），导致 SAR 需求被静默挂到同点位的既有光学任务上，
+  // 调用方拿回一个 ok 但参数完全不对的任务。
+  const norm = (v) => (v == null ? "" : String(v).trim().toLowerCase());
   const existing = active.map(pbTaskRow).find(t => {
     if (!(t.createdAt && new Date(String(t.createdAt).replace(" ", "T") + "Z").getTime() > twoDaysAgo)) return false;
+    if (norm(t.obsType) !== norm(b.obsType)) return false;                       // 光学≠SAR
+    const resA = Number(t.resolution), resB = Number(b.resolution);
+    if (Number.isFinite(resA) && Number.isFinite(resB) && Math.abs(resA - resB) > 1e-6) return false;
+    if (norm(t.windowStart) !== norm(b.windowStart)) return false;               // 时间窗不同=新任务
     try {
       const tg = JSON.parse(t.geom ?? "{}");
       if (b.geomType === "point" && tg.lat != null)
         return Math.abs(tg.lat - g.lat) < 0.01 && Math.abs(tg.lon - g.lon) < 0.01;
+      // 面目标：顶点数一致且首个顶点近似一致才复用（避免把不同区域混为同一任务）
+      if (b.geomType !== "point" && Array.isArray(tg.coords) && Array.isArray(g.coords)) {
+        if (tg.coords.length !== g.coords.length) return false;
+        const [a, c] = [tg.coords[0], g.coords[0]];
+        return Math.abs(a[0] - c[0]) < 0.01 && Math.abs(a[1] - c[1]) < 0.01;
+      }
       return false;
     } catch { return false; }
   });
@@ -304,6 +319,19 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
   catch (e) { if (e.status === 404) return res.status(404).json({ error: 'task not found' }); throw e; }
   t.id = ref.oldId ?? ref.rid;
   t.geom = JSON.parse(t.geom ?? "{}");
+  // P1-4 修复：任务详情也要带区域规划信息，供前端表单回显"这条任务覆盖什么区域、拆成几条带"
+  if (t.geomType !== 'point' && t.geom?.coords) {
+    try {
+      const ap = planTaskArea({ geomType: t.geomType, geom: JSON.stringify(t.geom) }, 12);
+      if (ap) t.areaPlan = {
+        scale: ap.scaleLabel, strategy: ap.policy.note, stripCount: ap.stats.stripCount,
+        direction: ap.direction, areaKm2: ap.stats.polygonAreaKm2,
+        redundancyPct: ap.stats.redundancyPct,
+        bboxKm: { width: ap.stats.widthKm, height: ap.stats.heightKm },
+        swathKm: ap.stats.swathKm, overlapPct: +(ap.policy.overlapRate * 100).toFixed(1),
+      };
+    } catch {}
+  }
   if (!t.createdAt) t.createdAt = "0000-00-00 00:00:00";
   // rankings：旧 SQL 为 rankings JOIN candidates（候选字段平铺），PB 侧用 expand=candidate 组装
   const ranked = await pbList("rankings", { filter: `task='${ref.rid}'`, sort: "rank", limit: 30, expand: "candidate" });
@@ -459,6 +487,17 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   const gapStats = {}; // 能力缺口统计
   const candOps = [];  // 候选批量插入（含被筛除行，诊断口径与旧版一致）
 
+  // ── 候选总量控制（2026-11-15 修复 P0-1）────────────────────────────────
+  // 旧实现：全局 inserted>200 就三层 break，导致后面的条带完全不被解算，
+  //   北京全域 21 条带只算前 7 条、全国 640 条带只算 34 条，却返回 ok。
+  // 新实现：按条带分配配额，保证**每条带都至少被解算**（先跑完覆盖面），
+  //   总条数超限时按「每条带保留最优若干候选」收敛，并在响应里明确标注是否截断。
+  const TOTAL_CAP = 6000;              // 总候选硬上限（防止全国任务写爆库）
+  const perStripCap = Math.max(3, Math.floor(TOTAL_CAP / Math.max(1, strips.length)));
+  const passPerStrip = new Map();      // stripIdx -> 已插入通过数
+  const totalCandidatesHardCap = TOTAL_CAP * 3; // 含被筛除行的总行数上限
+  let truncatedEarly = false;
+
   for (const sat of scope) {
     const cap = getCapability(sat);
     const company = sat.operator || sat.country;
@@ -492,13 +531,18 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           imgWinStart: w.imgWinStart ? new Date(w.imgWinStart).toISOString() : "",
           imgWinEnd: w.imgWinEnd ? new Date(w.imgWinEnd).toISOString() : "",
         } });
-        if (pass) inserted++;
+        if (pass) {
+          // 每条带的通过候选不超过配额；超配额仍可落库用于诊断，但不计入通过数
+          const cur = passPerStrip.get(strip.idx) ?? 0;
+          if (cur < perStripCap) { inserted++; passPerStrip.set(strip.idx, cur + 1); }
+        }
         anyInserted = true;
-        if (inserted > 200) break; // 上限保护
+        // 只限制总行数（含筛除诊断行），不再按通过数截断整个条带循环
+        if (candOps.length >= totalCandidatesHardCap) { truncatedEarly = true; break; }
       }
-      if (inserted > 200) break;
+      if (truncatedEarly) break;
     }
-    if (inserted > 200) break;
+    if (truncatedEarly) break;
   }
 
   // 候选落库（pbBatch 批量插入；响应仍返回旧口径数字）
@@ -515,7 +559,31 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   const passingRows = diagRows.filter(r => r.filtered === 0);
   const coverableRows = passingRows.filter(r => r.imgWinStart && r.imgWinEnd);
   let planningDiagnosis = null;
-  if (passingRows.length > 0 && coverableRows.length === 0) {
+  // P1-3 修复：原本只有"有候选但都拍不到"才诊断；"0 条通过"时反而静默。
+  // 改为两种情况都给诊断，只是归因不同。
+  if (passingRows.length === 0) {
+    const reasons = {};
+    for (const r of diagRows.filter(r => r.filtered === 1)) {
+      for (const part of (r.filterReason || '').split('；')) {
+        const k = part.split('：')[0];
+        if (k) reasons[k] = (reasons[k] ?? 0) + 1;
+      }
+    }
+    const topReasons = Object.entries(reasons).sort((a, b) => b[1] - a[1]);
+    planningDiagnosis = {
+      level: 'NO_CANDIDATE',
+      summary: `共解算 ${diagRows.length} 条候选记录，全部被约束筛除——当前参数下没有任何一条可执行`,
+      attribution: topReasons.length
+        ? `主要筛除原因：${topReasons.slice(0, 3).map(([k, v]) => `${k}×${v}`).join('、')}`
+        : '时窗内无过顶（可能落在重访间隙、夜间，或目标超出可见范围）',
+      suggestions: [
+        '按上面的筛除原因针对性放宽（云量上限 / 分辨率档位 / 时间窗长度）',
+        '或改用 SAR（不受云量与光照限制）',
+        '或扩大时间窗至 ≥7 天，给更多过顶机会',
+      ],
+      reasonBreakdown: reasons,
+    };
+  } else if (passingRows.length > 0 && coverableRows.length === 0) {
     // 排序非空但 0 颗幅宽可覆盖：全部候选都拍不到目标，问题在初始规划
     const passed = diagRows.filter(r => r.imgWinStart && r.imgWinEnd && r.filtered === 1);
     const best = [...passingRows].filter(r => r.minDistKm != null).sort((a, b) => a.minDistKm - b.minDistKm)[0];
@@ -548,8 +616,45 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     };
   }
 
+  // ── 覆盖计划汇总（2026-11-15 修复 P0-2）──────────────────────────────
+  // 旧版把条带规划算出来了却不告诉用户"覆盖了多少"，导致 21 条带只覆盖 7 条
+  // 也被当作成功。这里按条带统计：有可用候选=已排程，无=缺口，并明确给出覆盖率。
+  let coveragePlan = null;
+  let coverageWarning = null;
+  if (areaPlan && strips.length > 1) {
+    const byStrip = new Map();
+    for (const r of passingRows) {
+      const si = r.stripIdx ?? 0;
+      if (!byStrip.has(si) || (r.minDistKm != null && r.minDistKm < (byStrip.get(si).minDistKm ?? 1e9))) {
+        byStrip.set(si, { idx: si, satName: r.satName, overpass: r.overpassTime, minDistKm: r.minDistKm,
+                          slewDeg: r.slewDeg, imgWin: !!(r.imgWinStart && r.imgWinEnd) });
+      }
+    }
+    // 只有「通过约束且幅宽/侧摆可覆盖」才算真正覆盖该条带
+    const assigned = [...byStrip.values()].filter(a => a.imgWin);
+    coveragePlan = summarizeCoveragePlan(areaPlan, assigned);
+    if (coveragePlan.coveragePct < 100) {
+      coverageWarning = {
+        level: coveragePlan.coveragePct === 0 ? 'NONE_COVERED' : 'PARTIAL',
+        message: coveragePlan.coveragePct === 0
+          ? `本任务 ${coveragePlan.totalStrips} 条带中无一条带存在可用过顶，无法完成区域覆盖`
+          : `本任务 ${coveragePlan.totalStrips} 条带中仅 ${coveragePlan.scheduled} 条有可用过顶（覆盖率 ${coveragePlan.coveragePct}%），` +
+            `剩余 ${coveragePlan.unscheduled} 条带覆盖缺口，请扩大时窗/增加星座/降低分辨率后重算`,
+        gaps: coveragePlan.gaps.slice(0, 20),
+        suggestion: coveragePlan.coveragePct < 30
+          ? '建议改用多星多期方案（拉长时窗至 30~60 天，或加入宽幅星座），单星单窗无法完成'
+          : '建议扩大时窗或允许更多卫星参与，补齐剩余条带',
+      };
+    }
+  }
+  if (truncatedEarly) {
+    coverageWarning = { ...(coverageWarning ?? {}), truncated: true,
+      truncationNote: `候选行数达上限（${totalCandidatesHardCap}），部分条带候选未完整解算，实际覆盖可能低于统计值` };
+  }
+
   res.json({
     taskId: taskNumId, strips: strips.length, candidates: inserted, filtered, ranked, gapStats, planningDiagnosis,
+    coveragePlan, coverageWarning,
     // 覆盖计划：把"测哪个区域、拆成几条带、沿什么方向、重叠多少"直接返回给调用方
     areaPlan: areaPlan ? {
       scale: areaPlan.scaleLabel,
@@ -571,6 +676,9 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     } : null,
   });
 });
+
+// 任务级侧摆上限（缺省 45°）
+function policyMaxSlew() { return 45; }
 
 // ─── 派单执行（4.5）──────────────────────────────────────────────────────
 // R1~R6 分流判定
@@ -667,24 +775,64 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
 
   // 普通通道（PB 迁移：订单/任务状态/派发留痕/询价单批量在 pbBatch 内一次性提交，原子性同旧事务）
   const orderNo = `PO-${pbYmd()}-${String(await pbNextSeq("orderNo")).padStart(3, "0")}`;
-  const company = ranking[0].company;
-  const newOrderOldId = await pbNextOldId("orders");
-  const batchOps = [
-    { table: "orders", oldId: newOrderOldId, data: {
-      oldId: newOrderOldId,
-      task: ref.rid, orderNo, channel, company, satNoradId: ranking[0].satNoradId ?? 0, satName: ranking[0].satName ?? "",
-      rankUsed: ranking[0].rank ?? 0,
+  // ── 按条带分派（2026-11-15 修复 P0-3）──────────────────────────────────
+  // 旧实现只用 ranking[0] 出一张订单：21 条带的任务也只派 1 条带，
+  // 其余 20 条带无人承接却把任务置为"已派发"（静默丢覆盖）。
+  // 新实现：每个「有可用候选」的条带各出一张订单（各自选最优候选），
+  //   未被覆盖的条带明确列在响应里，任务状态按是否全覆盖区分。
+  const stripGroups = new Map(); // stripIdx -> 该条带的最优候选（按 rank）
+  for (const rk of ranking) {
+    const si = rk.stripIdx ?? 1;
+    if (!stripGroups.has(si)) stripGroups.set(si, rk);
+  }
+  const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
+    .reduce((mx, c) => Math.max(mx, c.stripIdx ?? 1), 1);
+  const coveredIdx = [...stripGroups.keys()].sort((a, b) => a - b);
+  const uncoveredIdx = [];
+  for (let i = 1; i <= totalStrips; i++) if (!stripGroups.has(i)) uncoveredIdx.push(i);
+
+  const batchOps = [];
+  const createdOrders = [];
+  for (const si of coveredIdx) {
+    const rk = stripGroups.get(si);
+    const oNo = `PO-${pbYmd()}-${String(await pbNextSeq("orderNo")).padStart(3, "0")}`;
+    const oOld = await pbNextOldId("orders");
+    createdOrders.push({ stripIdx: si, orderNo: oNo, oldId: oOld, satName: rk.satName, company: rk.company, rank: rk.rank ?? 0 });
+    batchOps.push({ table: "orders", oldId: oOld, data: {
+      oldId: oOld,
+      task: ref.rid, orderNo: oNo, channel, company: rk.company,
+      satNoradId: rk.satNoradId ?? 0, satName: rk.satName ?? "",
+      rankUsed: rk.rank ?? 0,
       targetName: task.targetName, obsType: task.obsType, resolution: task.resolution,
       windowStart: task.windowStart, windowEnd: task.windowEnd, maxCloud: task.maxCloud ?? 0,
       deliveryDeadline: task.windowEnd, status: '已派发', createdAt: pbNow(),
       statusHistory: JSON.stringify([{ status: '已派发', time: new Date().toISOString(), source: '平台' }]),
-    } },
-    { table: "tasks", method: "UPDATE", recordId: ref.rid, data: { status: '已派发' } },
-    { table: "dispatchLog", data: { task: ref.rid, channel, company, rank: ranking[0].rank ?? 0, action: '派发', detail: rule, at: pbNow() } },
-  ];
+    } });
+  }
+  const fullCovered = uncoveredIdx.length === 0;
+  batchOps.push({ table: "tasks", method: "UPDATE", recordId: ref.rid, data: { status: fullCovered ? '已派发' : '部分派发' } });
+  batchOps.push({ table: "dispatchLog", data: { task: ref.rid, channel,
+    company: createdOrders[0]?.company, rank: createdOrders[0]?.rank ?? 0, action: '派发',
+    detail: `${rule}；条带 ${coveredIdx.length}/${totalStrips} 已派${fullCovered ? '' : `，未覆盖 ${uncoveredIdx.length} 条`}`, at: pbNow() } });
   const batchResults = await pbBatch(batchOps);
   const orderRec = batchResults[0];
   if (!orderRec?.ok) return res.status(500).json({ error: '订单落库失败', detail: orderRec?.data });
+  return res.json({
+    channel, rule,
+    orderId: orderRec.data.oldId ?? orderRec.data.id,
+    orderNo: createdOrders[0]?.orderNo,
+    company: createdOrders[0]?.company,
+    inquiries: [],
+    stripDispatch: {
+      totalStrips,
+      dispatchedStrips: coveredIdx.length,
+      coveragePct: totalStrips ? +((coveredIdx.length / totalStrips) * 100).toFixed(1) : 100,
+      orders: createdOrders,
+      uncoveredStrips: uncoveredIdx,
+      warning: fullCovered ? null
+        : `仅 ${coveredIdx.length}/${totalStrips} 条带已派单，剩余 ${uncoveredIdx.length} 条带无可用候选，任务状态标为「部分派发」`,
+    },
+  });
 
   // 询价通道：同时向其他候选公司发询价单
   let inquiries = [];
@@ -701,7 +849,6 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     }
     if (inquiryOps.length) await pbBatch(inquiryOps);
   }
-  res.json({ channel, rule, orderId: orderRec.data.oldId ?? orderRec.data.id, orderNo, company, inquiries });
 });
 
 // 询价报价（模拟公司响应）——PB 迁移版（订单数字 id 经 oldId 回查）
@@ -941,7 +1088,7 @@ export function generateCommands(plan, sat, strip, windowStart, windowEnd) {
   const slew = plan.slewDeg ?? 15;
   // 姿态机动/稳定/预热按型号真实口径（payload_specs 调研库）：
   // 机动速率 高分系0.13~0.19°/s、敏捷商业星0.5~1.5°/s；稳定5~20s；光学开机预热2~10min（取300s量级）
-  const spec = getPayloadSpec(plan.satName);
+  const spec = getPayloadSpec(plan.satName, sat);  // 传入卫星元数据，SAR/光学判定以实库为准
   const omegaMax = spec?.slewRate ?? 1.0;             // °/s 型号真实值
   const alphaMax = 0.5;                                // °/s² 典型
   // 凝视型载荷（GEO 如 GAOFEN-4，slewRate=0）：指向靠扫描机构/电子稳像，无姿态机动，机动时长为 0
@@ -1021,6 +1168,34 @@ export function validateCommands(commands, sat, plan) {
     const seqStart = new Date(plan.sequenceStartIso ?? plan.windowStart).getTime();
     const imgStart = seqStart + imgCmd.startOffset * 1000;
     const imgCenter = imgStart + imgCmd.duration * 1000 / 2;
+    // ── 几何覆盖校验（2026-11-15 修复 P1-2）──────────────────────────────
+    // 历史问题：只要候选表里 imgWin 有值就当"拍得到"，但 imgWin 由侧摆可达范围算出，
+    // 与"实际成像时刻卫星是否对准目标"是两件事。这里独立复核：
+    //   侧摆角 = atan(最近距离 / 轨道高度)，必须 ≤ 该星侧摆上限；
+    //   且最近距离不能超过「侧摆可达地面距离 + 幅宽半宽投影」。
+    if (plan.minDistKm != null && sat) {
+      const caps2 = getCapability(sat);
+      const alt2 = Number.isFinite(+sat.altitude) && sat.altitude > 100 && sat.altitude < 20000 ? +sat.altitude : null;
+      if (alt2) {
+        const theta = Math.atan(plan.minDistKm / alt2) * 180 / Math.PI;
+        const slewLimit = Math.min(caps2.slewLimitDeg ?? 45, policyMaxSlew());
+        const halfFoot = (caps2.swathKm / 2) / Math.cos(theta * Math.PI / 180);
+        const reachKm = alt2 * Math.tan(slewLimit * Math.PI / 180) + halfFoot;
+        if (plan.minDistKm > reachKm) {
+          errors.push({
+            code: 'GEOMETRY_UNREACHABLE',
+            msg: '几何不可达：该候选过顶时卫星无法把目标纳入成像范围，此指令下发后拍不到目标',
+            detail: {
+              satName: plan.satName, minDistKm: +plan.minDistKm.toFixed(1),
+              requiredSlewDeg: +theta.toFixed(1), slewLimitDeg: slewLimit,
+              swathKm: caps2.swathKm, reachableKm: +reachKm.toFixed(1),
+              overByKm: +(plan.minDistKm - reachKm).toFixed(1),
+              conclusion: `需侧摆 ${theta.toFixed(1)}°（上限 ${slewLimit}°），最远可达 ${reachKm.toFixed(1)}km，实际 ${plan.minDistKm.toFixed(1)}km，超出 ${(plan.minDistKm - reachKm).toFixed(1)}km`,
+            },
+          });
+        }
+      }
+    }
     if (!plan.imgWinStart || !plan.imgWinEnd) {
       // 结构化驳回：给出「差多少才够拍」的数值诊断（幅宽/最近距离/侧摆/需要的高度）
       // 数据源：candidates 落库的 minDistKm（精确 TCA 距离）+ sat_specs 型号幅宽（官方公开参数）
