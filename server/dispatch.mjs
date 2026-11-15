@@ -57,7 +57,7 @@ async function pbResolveTask(idParam) {
   return s ? { rid: s, oldId: null } : null;
 }
 import {
-  normalizeTaskStrips, computeVisibleWindows, forecastCloud, cloudEffective,
+  normalizeTaskStrips, planTaskArea, computeVisibleWindows, forecastCloud, cloudEffective,
   applyConstraints, getCapability, haversineKm,
 } from "./candidate_calc.mjs";
 import { forecastCloudReal } from "./cloud_forecast.mjs";
@@ -434,6 +434,8 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     minElevSunDeg: 10,
   };
   const strips = normalizeTaskStrips(task, 12);
+  // 区域规划元信息（尺度/策略/方位角/条带统计）——用于向用户说明"测哪儿、怎么拆的"
+  const areaPlan = task.geomType === 'point' ? null : planTaskArea(task, 12);
   const tCreated = new Date(task.createdAt);
 
   // 候选卫星范围：观测类型匹配的卫星（SAR任务只看SAR卫星，反之光学）
@@ -546,7 +548,28 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     };
   }
 
-  res.json({ taskId: taskNumId, strips: strips.length, candidates: inserted, filtered, ranked, gapStats, planningDiagnosis });
+  res.json({
+    taskId: taskNumId, strips: strips.length, candidates: inserted, filtered, ranked, gapStats, planningDiagnosis,
+    // 覆盖计划：把"测哪个区域、拆成几条带、沿什么方向、重叠多少"直接返回给调用方
+    areaPlan: areaPlan ? {
+      scale: areaPlan.scaleLabel,
+      strategy: areaPlan.policy.note,
+      stripCount: areaPlan.stats.stripCount,
+      direction: areaPlan.direction,
+      areaKm2: areaPlan.stats.polygonAreaKm2,
+      stripAreaKm2: areaPlan.stats.totalStripAreaKm2,
+      redundancyPct: areaPlan.stats.redundancyPct,
+      bboxKm: { width: areaPlan.stats.widthKm, height: areaPlan.stats.heightKm },
+      swathKm: areaPlan.stats.swathKm,
+      stepKm: areaPlan.stats.stepKm,
+      overlapPct: +(areaPlan.policy.overlapRate * 100).toFixed(1),
+      strips: areaPlan.strips.map(st => ({
+        idx: st.idx, center: [st.lat, st.lon], start: st.start, end: st.end,
+        widthKm: st.widthKm, lengthKm: st.lengthKm, areaKm2: st.areaKm2,
+        azimuthDeg: st.azimuthDeg, overlapPct: st.overlapPct,
+      })),
+    } : null,
+  });
 });
 
 // ─── 派单执行（4.5）──────────────────────────────────────────────────────

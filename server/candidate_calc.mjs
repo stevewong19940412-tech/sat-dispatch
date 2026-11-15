@@ -3,36 +3,44 @@
 // 确定性计算，全部可复算。轨道预报基于底座 SGP4。
 import * as satellite from "satellite.js";
 import { getSatSpec, getCapabilityBySpec } from "./sat_specs.mjs";
+import { planAreaStrips } from "./strip_planner.mjs";
 
 const EARTH_R = 6371;
 
 // ─── 任务几何归一化 ──────────────────────────────────────────────────────
-// 点目标单条带；面目标按幅宽沿垂直航向拆分（简化实现：以 AOI 外接圆估条带数）
-export function normalizeTaskStrips(task, swathKm = 12) {
+// 2026-11-15 重写：委托给全尺度自适应规划器 strip_planner.mjs。
+//
+// 旧实现的问题（已废弃）：
+//   · 条带数按「外接圆直径/幅宽」，北京全域算出 22 条并外扩 37.5km 到张家口/廊坊
+//   · 条带沿经度（东西）排列，而卫星过顶是南北向，方向差 90°
+//   · 未控制重叠率，相邻带间还有 0.02km 缝隙
+// 新实现：局部投影建系 + 沿星下点轨迹切条带 + 重叠率控制 + 尺度自适应策略。
+export function normalizeTaskStrips(task, swathKm = 12, opts = {}) {
   const geom = JSON.parse(task.geom);
-  // 目标三分类（成像任务规划标准口径）：点目标（单景覆盖）/ 线目标 / 面目标（需拆条带）
-  // point = 点；area|polygon = 面；其它一律按面兜底（避免区域需求被静默降级成点）
   if (task.geomType === 'point') {
-    return [{ idx: 1, count: 1, lat: geom.lat, lon: geom.lon, radiusKm: 1 }];
+    return [{ idx: 1, count: 1, lat: geom.lat, lon: geom.lon, radiusKm: 1, widthKm: swathKm,
+              lengthKm: 0, areaKm2: 0, azimuthDeg: 0, overlapPct: 0, coverageRatio: 1 }];
   }
-  // 面目标（area/polygon）：质心 + 半径（用于可见窗判定的等效圆，条带数按直径/幅宽）
-  const coords = geom.coords;
-  let latSum = 0, lonSum = 0;
-  for (const [la, lo] of coords) { latSum += la; lonSum += lo; }
-  const cLat = latSum / coords.length, cLon = lonSum / coords.length;
-  let maxD = 0;
-  for (const [la, lo] of coords) {
-    const d = haversineKm(cLat, cLon, la, lo);
-    if (d > maxD) maxD = d;
+  const coords = geom.coords || geom.points;
+  if (!Array.isArray(coords) || coords.length < 3) {
+    throw new Error('面目标 geom.coords 至少需要 3 个 [lat,lon] 顶点');
   }
-  const stripCount = Math.max(1, Math.ceil((maxD * 2) / swathKm));
-  // 条带沿经度方向排布（简化）
-  const strips = [];
-  for (let i = 0; i < stripCount; i++) {
-    const offLon = (i - (stripCount - 1) / 2) * (swathKm / (111 * Math.cos(cLat * Math.PI / 180)));
-    strips.push({ idx: i + 1, count: stripCount, lat: cLat, lon: cLon + offLon, radiusKm: swathKm / 2 });
-  }
-  return strips;
+  // 传给规划器的额外参数（轨道倾角、重叠率、强制尺度）可经 opts 覆盖
+  const plan = planAreaStrips(coords, {
+    swathKm,
+    incDeg: opts.incDeg ?? 97.9,
+    overlapRate: opts.overlapRate,
+    forceScale: opts.forceScale,
+  });
+  // 把规划摘要挂到数组上，供 dispatch 侧生成覆盖计划（不改变原有数组用法）
+  Object.defineProperty(plan.strips, 'planMeta', { value: plan, enumerable: false });
+  return plan.strips;
+}
+
+/** 供 dispatch 侧读取完整规划信息（尺度/策略/统计/方向） */
+export function planTaskArea(task, swathKm = 12, opts = {}) {
+  const strips = normalizeTaskStrips(task, swathKm, opts);
+  return strips.planMeta ?? null;
 }
 
 export function haversineKm(lat1, lon1, lat2, lon2) {
@@ -221,22 +229,37 @@ export function computeVisibleWindows(sat, strip, opts) {
     // 历史坑：曾用 startWith 前缀匹配 DEFAULT_CAPS，GAOFEN-9/11/13 全落到 GAOFEN 统配 14km，
     // JILIN-1 KUANFU 落到 JILIN 统配 12km，导致大量中宽幅星被误判"拍不到"。
     const spec = getSatSpec(sat);
+    // ── 覆盖判定（2026-11-15 重构，核心修正）──────────────────────────────
+    // 旧逻辑：只要星下点距目标 ≤ 幅宽半宽 才算能拍。
+    //   → 把敏捷卫星的侧摆能力完全忽略了：一颗 45° 侧摆的卫星能拍星下点
+    //     几百公里外的目标，旧逻辑却判"拍不到"，导致单星对北京全域只能覆盖 1/21 条带。
+    //
+    // 新逻辑：目标在侧摆可达范围内即可成像。
+    //   侧摆角 θ = atan(d / h)，要求 θ ≤ 侧摆上限（型号 slewLimitDeg，受任务 maxSlewDeg 限制）
+    //   同时幅宽要能覆盖目标附近的条带宽度：地面投影半宽 = swath/2 / cos(θ)
+    //   （侧摆越大，地面足迹越宽但分辨率越差——分辨率退化由 applyConstraints 单独判）
     const footprintHalfKm = spec.swathKm / 2;
+    const slewLimit = Math.min(spec.slewMax ?? 45, maxSlewDeg);
+    // 侧摆可达的最大地面距离（km）
+    const maxSlewGroundKm = altKm * Math.tan(slewLimit * Math.PI / 180);
     let imgWinStart = null, imgWinEnd = null;
-    for (const p of fine) {
-      const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
-      if (dKm <= footprintHalfKm) {
-        if (imgWinStart === null) imgWinStart = p.t;
-        imgWinEnd = p.t;
-      }
-    }
-    // 采样精化：幅宽穿越窗仅 1.6s 级，直接在已取出的 1s 轨（fineTrack）上重定边界，
-    // 不再单独 propagate（原先每窗 240 次 propagate + makeSatrec）
+    let bestSlew = null, bestDist = null;
     {
       let s = null, e = null;
       for (const p of fineTrack) {
         const dKm = haversineKm(p.lat, p.lon, strip.lat, strip.lon);
-        if (dKm <= footprintHalfKm) { if (s === null) s = p.t; e = p.t; }
+        // 目标落在该时刻侧摆可达脚印内 → 可成像
+        if (dKm <= maxSlewGroundKm) {
+          const theta = Math.atan(dKm / Math.max(1, p.altKm ?? altKm));
+          const thetaDeg = theta * 180 / Math.PI;
+          // 侧摆后地面足迹半宽（含幅宽投影）
+          const halfFootprint = footprintHalfKm / Math.cos(theta);
+          if (dKm <= maxSlewGroundKm + halfFootprint) {
+            if (s === null) s = p.t;
+            e = p.t;
+            if (bestDist === null || dKm < bestDist) { bestDist = dKm; bestSlew = thetaDeg; }
+          }
+        }
       }
       if (s !== null) { imgWinStart = new Date(s).toISOString(); imgWinEnd = new Date(e).toISOString(); }
     }
@@ -245,6 +268,8 @@ export function computeVisibleWindows(sat, strip, opts) {
       imgWinStart: imgWinStart,          // 成像覆盖窗起点（幅宽内；null=整个过境幅宽都罩不住目标）
       imgWinEnd: imgWinEnd,              // 成像覆盖窗终点
       overpass: tcaT,                    // 精确 TCA（最近过顶点）
+      bestSlewDeg: bestSlew,             // 成像时刻实际侧摆角（可达范围内最优）
+      maxSlewGroundKm: +maxSlewGroundKm.toFixed(1), // 侧摆可达地面距离上限
       minDistKm: tcaD,                   // 精确最小距离
       slewDeg: slew,                     // TCA 时刻精确侧摆（atan 几何）
       refined: true,
