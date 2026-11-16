@@ -152,6 +152,67 @@ dispatchApi.post("/order-intake", async (req, res) => {
     return res.json({ reused: true, taskId: existing.id, taskNo: existing.taskNo, status: existing.status, candidates: ranked.length ?? null });
   }
 
+  // ── 面目标按条带拆成多个独立任务（2026-11-16 用户口径）────────────────────
+  // 用户明确要求：「一个区域需求 → 每个条带就是一个独立任务」，而不是
+  // 「1 个任务派 5 张订单」。这样每条带都能独立派单、独立直控、独立跟踪履约。
+  // 点目标不拆；面目标先规划条带，>1 条时逐条建任务并返回任务列表。
+  let stripPlan = null;
+  if (b.geomType !== "point" && Array.isArray(g.coords) && g.coords.length >= 3 && b.splitStrips !== false) {
+    try {
+      const planned = normalizeTaskStrips({ geomType: 'polygon', geom: JSON.stringify({ coords: g.coords }) }, 12);
+      if (planned.length > 1) stripPlan = planned;
+    } catch (e) { console.error('[order-intake] 条带规划失败，按单任务处理:', e.message); }
+  }
+  if (stripPlan) {
+    const created = [];
+    const baseName = b.taskName;
+    for (const st of stripPlan) {
+      // 每条带用自己的中心点 + 覆盖范围作为独立目标
+      const lat = st.lat, lon = st.lon;
+      const halfLat = Math.max(0.005, (st.lengthKm ?? 10) / 2 / 110.57);
+      const halfLon = Math.max(0.005, (st.widthKm ?? 12) / 2 / (111.32 * Math.cos(lat * Math.PI / 180)));
+      const stripGeom = {
+        coords: [
+          [lat + halfLat, lon - halfLon],
+          [lat + halfLat, lon + halfLon],
+          [lat - halfLat, lon + halfLon],
+          [lat - halfLat, lon - halfLon],
+        ],
+      };
+      const tk = {
+        taskNo: pbTaskNo(await pbNextSeq("taskNo")),
+        taskName: `${baseName}-第${String(st.idx).padStart(2, '0')}带（共${stripPlan.length}带）`,
+        targetName: `${b.targetName ?? baseName}-带${st.idx}`,
+        source: b.source ?? "AI下单助手",
+        geomType: "polygon", geom: JSON.stringify(stripGeom),
+        obsType: b.obsType, resolution: b.resolution,
+        windowStart: b.windowStart, windowEnd: b.windowEnd, maxCloud: b.maxCloud ?? 50,
+        priority: b.priority ?? "常规", isEmergency: b.isEmergency ? 1 : 0,
+        taskPhase: b.taskPhase ?? null, confidence: b.confidence ?? null, parseNote: b.parseNote ?? null,
+        // 记录所属父区域与条带序号，便于按区域汇总
+        parentArea: baseName, stripIdx: st.idx, stripCount: stripPlan.length,
+        pendingConfirm: 0, status: "待派单", createdAt: pbNow(), oldId: await pbNextOldId(),
+      };
+      await pbCreate("tasks", tk);
+      const rw = await pbGetByOldId("tasks", tk.oldId);
+      if (!rw) continue;
+      created.push({ taskId: rw.oldId ?? rw.id, taskNo: rw.taskNo, stripIdx: st.idx, taskName: tk.taskName, recordId: rw.id });
+    }
+    // 逐条算候选（串行，避免并发压垮单进程）
+    for (const c of created) {
+      try {
+        await fetch(`http://127.0.0.1:${process.env.PORT ?? 8800}/api/dispatch/tasks/${c.taskId}/candidates`,
+          { method: "POST", headers: { "Content-Type": "application/json", "X-Operator": "system" } });
+      } catch (e) { console.error(`[order-intake] 条带${c.stripIdx}候选计算失败:`, e.message); }
+    }
+    return res.json({
+      ok: true, split: true, stripCount: stripPlan.length,
+      parentArea: baseName,
+      tasks: created.map(c => ({ taskId: c.taskId, taskNo: c.taskNo, stripIdx: c.stripIdx, taskName: c.taskName })),
+      note: `面目标已按 ${stripPlan.length} 条带拆成 ${created.length} 个独立任务（每条带一单，可分别派单/直控）`,
+    });
+  }
+
   // 1) 新建（沿用 create 逻辑的内部路径：PB 创建，oldId 充当响应数字 id）
   const task = {
     taskNo: pbTaskNo(await pbNextSeq("taskNo")), taskName: b.taskName, targetName: b.targetName ?? b.taskName,

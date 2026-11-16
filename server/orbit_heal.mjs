@@ -169,6 +169,10 @@ const REQUIRED_FIELDS = {
   ],
   tasks: [
     { name: 'multiPlan', type: 'text' },   // 分派方案 JSON，派单直接复用（避免重算分叉）
+    // 区域拆单：记录所属父区域与条带序号，便于按区域汇总与前端分组展示
+    { name: 'parentArea', type: 'text' },
+    { name: 'stripIdx', type: 'number' },
+    { name: 'stripCount', type: 'number' },
   ],
 };
 
