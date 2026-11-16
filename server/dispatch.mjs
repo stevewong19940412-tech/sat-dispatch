@@ -64,6 +64,7 @@ import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
 import { summarizeCoveragePlan } from "./strip_planner.mjs";
+import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
 import { solarElevationDegFor } from "./solar.mjs";
 
@@ -690,6 +691,48 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     coveragePlan = summarizeCoveragePlan(areaPlan, assigned);
     coveragePlan.partialStrips = partialStrips;
     coveragePlan.coverageMethod = 'grid-point (网格粒度=幅宽/8)';
+
+    // ── 多星协同分派（2026-11-16 新增，任务规划核心能力）──────────────────
+    // 任务规划的本质不是"让一颗星干完"，而是：判断要不要拆单 → 把条带分给多颗星。
+    // 依据集合覆盖模型（Perea 2015 IEEE TAES / CN115659556A / Chen 2020 RS）：
+    //   目标 = 最大化覆盖率，同时尽量少用卫星；贪心选取"单位资源增益最高"的分配。
+    try {
+      const candByStrip = new Map();
+      for (const r of passingRows) {
+        const si = r.stripIdx ?? 1;
+        if (!candByStrip.has(si)) candByStrip.set(si, []);
+        candByStrip.get(si).push({
+          satName: r.satName, satNoradId: r.satNoradId, company: r.company,
+          overpass: r.overpassTime, slewDeg: r.slewDeg,
+          stripCoverage: r.stripCoverage, imgWinStart: r.imgWinStart, imgWinEnd: r.imgWinEnd,
+        });
+      }
+      const allStrips = strips.map(st => ({ idx: st.idx, widthKm: st.widthKm ?? swathForPlan,
+        lengthKm: st.lengthKm ?? 0, start: st.start, end: st.end }));
+      const split = shouldSplitOrder(allStrips, candByStrip, { minCoverage: 0.85 });
+      const multi = dispatchAcrossSatellites(allStrips, candByStrip, { minCoverage: 0.85 });
+      coveragePlan.multiSatellite = {
+        needSplit: split.needSplit,
+        splitReason: split.reason,
+        bestSingleSat: split.bestSingleSat,
+        bestSingleCovered: split.bestSingleCovered,
+        satelliteCount: multi.stats.satelliteCount,
+        satellites: multi.satellites,
+        coveragePct: multi.coverage.coveragePct,
+        assignedStrips: multi.coverage.assignedStrips,
+        totalStrips: multi.coverage.totalStrips,
+        areaCoveredKm2: multi.coverage.areaCoveredKm2,
+        spanDays: multi.stats.spanDays,
+        gaps: multi.gaps.slice(0, 30),
+        assignments: multi.assignments.map(a => ({
+          stripIdx: a.stripIdx, satName: a.satName, company: a.company,
+          overpass: a.overpass, slewDeg: a.slewDeg,
+          coveragePct: +(a.coverage * 100).toFixed(1), grade: a.grade,
+        })),
+      };
+    } catch (e) {
+      console.error('[multi-dispatch] 分派失败:', e.message);
+    }
     if (coveragePlan.coveragePct < 100) {
       coverageWarning = {
         level: coveragePlan.coveragePct === 0 ? 'NONE_COVERED' : 'PARTIAL',
@@ -849,11 +892,18 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     stripById.set(c.id, c.stripIdx ?? 1);
     if (c.oldId != null) stripById.set(c.oldId, c.stripIdx ?? 1);
   }
-  const stripGroups = new Map(); // stripIdx -> 该条带的最优候选（按 rank 顺序取第一个）
+  // 每个条带选出「覆盖率最高且通过约束」的候选。
+  // 注意：不能只按 rank 取第一个——rank 是优先级分，不含覆盖率；
+  // 一个 rank 高但覆盖率仅 60% 的候选，不如 rank 低但覆盖 100% 的。
+  const stripGroups = new Map();
   for (const rk of ranking) {
-    // 优先用 ranking 映射时带出的 stripIdx（来自 expand.candidate），回查仅作兜底
     const si = rk.stripIdx ?? stripById.get(rk.candidateId) ?? 1;
-    if (!stripGroups.has(si)) stripGroups.set(si, rk);
+    const cur = stripGroups.get(si);
+    if (!cur) { stripGroups.set(si, rk); continue; }
+    const rc = rk.stripCoverage ?? 0, cc = cur.stripCoverage ?? 0;
+    if (rc > cc + 0.02 || (Math.abs(rc - cc) <= 0.02 && (rk.rank ?? 1e9) < (cur.rank ?? 1e9))) {
+      stripGroups.set(si, rk);
+    }
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
     .reduce((mx, c) => Math.max(mx, c.stripIdx ?? 1), 1);
