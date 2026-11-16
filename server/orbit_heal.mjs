@@ -167,6 +167,9 @@ const REQUIRED_FIELDS = {
   candidates: [
     { name: 'stripCoverage', type: 'number' },
   ],
+  tasks: [
+    { name: 'multiPlan', type: 'text' },   // 分派方案 JSON，派单直接复用（避免重算分叉）
+  ],
 };
 
 export async function healCollectionFields() {

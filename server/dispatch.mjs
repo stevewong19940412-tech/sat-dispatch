@@ -65,6 +65,7 @@ import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
 import { summarizeCoveragePlan } from "./strip_planner.mjs";
 import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
+import { coverageGrade } from "./coverage_grid.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
 import { solarElevationDegFor } from "./solar.mjs";
 
@@ -712,7 +713,11 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           satName: r.satName, satNoradId: r.satNoradId, company: r.company,
           overpass: r.overpassTime, slewDeg: r.slewDeg,
           stripCoverage: r.stripCoverage, imgWinStart: r.imgWinStart, imgWinEnd: r.imgWinEnd,
-          lengthKm: stDef?.lengthKm ?? 60,   // 分派器算成像时长需要
+          // 字段名必须是 stripLengthKm —— 分派器读的是 picked.lengthKm / strip.lengthKm，
+          // 而 candidates 侧此前只写了 lengthKm，导致恒取兜底 60km，
+          // 成像时长约束用错长度、超载簇没被裁掉（第五轮验收 P0-1）。
+          lengthKm: stDef?.lengthKm ?? 60,
+          stripLengthKm: stDef?.lengthKm ?? 60,
         });
       }
       // 点目标没有 start/end（只有中心点坐标），这里补成同点，避免下游解构 undefined 抛错
@@ -730,6 +735,14 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       });
       const split = shouldSplitOrder(allStrips, candByStrip, { minCoverage: 0.85 });
       const multi = dispatchAcrossSatellites(allStrips, candByStrip, { minCoverage: 0.85 });
+      // 持久化分派方案供派单复用（第五轮 P0-2：派单曾自己重算，输入口径不同导致 0% 一致）
+      try {
+        await pbUpdate("tasks", ref.rid, { multiPlan: JSON.stringify(multi.assignments.map(a => ({
+          stripIdx: a.stripIdx, satName: a.satName, company: a.company,
+          overpass: a.overpass, slewDeg: a.slewDeg, coverage: a.coverage,
+        }))) });
+      } catch (e) { console.error('[multi-plan] 持久化失败:', e.message); }
+
       coveragePlan.multiSatellite = {
         needSplit: split.needSplit,
         splitReason: split.reason,
@@ -751,6 +764,12 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           stripIdx: a.stripIdx, satName: a.satName, company: a.company,
           overpass: a.overpass, slewDeg: a.slewDeg,
           coveragePct: +(a.coverage * 100).toFixed(1), grade: a.grade,
+          // 审计字段：让前端/验收能自行复核成像时长与窗口约束
+          stripLengthKm: a.stripLengthKm ?? null,
+          stripWidthKm: a.stripWidthKm ?? null,
+          imagingSec: +((a.stripLengthKm ?? 60) / 6.83).toFixed(1),
+          imgWinStart: a.imgWinStart ?? null,
+          imgWinEnd: a.imgWinEnd ?? null,
         })),
       };
       // 统一覆盖率口径（修复 F4：同一响应出现 44.1% / 30.5% / 96.6% 三个数）
@@ -957,7 +976,32 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   const allStripDefs = [];
   for (let i = 1; i <= totalStrips; i++) allStripDefs.push({ idx: i, lengthKm: stripLenByIdx.get(i) ?? 60 });
 
-  const plan = dispatchAcrossSatellites(allStripDefs, candByStrip, { minCoverage: 0.85 });
+  // 优先复用 candidates 阶段已算好并持久化的分派方案（第五轮 P0-2）：
+  // 旧实现派单时自己重跑 dispatchAcrossSatellites，但输入用 ranking（Top-N 排序结果）
+  // 而非 candidates 的 passingRows，两次结果必然分叉——实测订单与方案一致率 0%。
+  let plan = null;
+  try {
+    if (task.multiPlan) {
+      const saved = JSON.parse(task.multiPlan);
+      if (Array.isArray(saved) && saved.length) {
+        plan = {
+          assignments: saved.map(a => ({
+            stripIdx: a.stripIdx, satName: a.satName, company: a.company,
+            overpass: a.overpass, slewDeg: a.slewDeg, coverage: a.coverage ?? 1,
+            grade: coverageGrade(a.coverage ?? 1),
+          })),
+          satellites: [], gaps: [], stats: { satelliteCount: new Set(saved.map(a => a.satName)).size },
+        };
+        // 用候选表补齐 gaps：未被分派的条带
+        const assignedSet = new Set(saved.map(a => a.stripIdx));
+        for (let i = 1; i <= totalStrips; i++) {
+          if (!assignedSet.has(i)) plan.gaps.push({ stripId: i, reason: '候选阶段判定无法排入' });
+        }
+      }
+    }
+  } catch (e) { console.error('[dispatch] 复用分派方案失败，回退重算:', e.message); }
+  if (!plan) plan = dispatchAcrossSatellites(allStripDefs, candByStrip, { minCoverage: 0.85 });
+  plan.reused = !!task.multiPlan;
   // 用条带号 + 卫星名回查原始 ranking 记录（订单要写 satNoradId/rank 等字段）
   const rkIndex = new Map();
   for (const rk of ranking) {
