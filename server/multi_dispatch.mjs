@@ -201,6 +201,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
   // 正确口径：一次过顶的可用成像时长 = 该簇内所有条带成像窗的**并集长度**
   // （同一过顶的 imgWin 基本重合），簇内所有条带的成像时长之和不得超过它。
   let removedAllCount = 0;
+  let constraintDebug = [];
   {
     const bySat = new Map();
     for (const a of assignments) {
@@ -259,6 +260,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
         availSec = Math.max(availSec, 30);   // 单次过顶至少按 30s 计（保守下限）
 
         // ② 簇内联合约束：Σ成像时长 + Σ机动 ≤ 可用时长
+        const _dbgAvail = availSec, _dbgN = cl.length;
         let used = 0;
         const keptInCluster = [];
         const removedInCluster = [];      // 本簇自己的移除列表，不跨簇
@@ -271,6 +273,13 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
           }
           used += imgSec + maneuverSec;
           keptInCluster.push(cl[i]);
+        }
+        if (process.env.DEBUG_CLUSTER || true) {
+          // 每次运行都记一条，写入返回体的 constraintAudit.clusters
+          (constraintDebug ??= []).push({
+            sat: cl[0]?.satName, n: _dbgN, availSec: +_dbgAvail.toFixed(1),
+            usedSec: +used.toFixed(1), removed: removedInCluster.length,
+          });
         }
         // ③ 只 splice 本簇内被移除的记录
         for (const r of removedInCluster) {
@@ -294,6 +303,16 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       }
     }
     removedAllCount = removedAll.length;
+    // 逐簇核算明细（验收可直接核对每个簇的容量与用量）
+    dispatchAcrossSatellites._audit = [];
+    for (const [, list2] of bySat) {
+      const arr = [...list2];
+      if (!arr.length) continue;
+      dispatchAcrossSatellites._audit.push({
+        sat: arr[0].satName, kept: arr.length,
+        needSec: +(arr.reduce((a, x) => a + (x.stripLengthKm ?? 60) / 6.83, 0) + 12 * Math.max(0, arr.length - 1)).toFixed(1),
+      });
+    }
     // 被裁掉的条带补回 gaps（给出真实数值依据）
     for (const r of removedAll) {
       gaps.push({
@@ -310,6 +329,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     totalStrips: strips.length,
     assignedAfterConstraint: assignments.length,
     removedByImagingTime: removedAllCount,
+    clusters: constraintDebug,
   };
 
   // ── 步骤3：汇总 ──
