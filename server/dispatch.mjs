@@ -105,6 +105,91 @@ dispatchApi.post("/tasks/:id/revoke", async (req, res) => {
 // 任务级人工确认：AI 建单默认 pendingConfirm=true（待人工确认下发），
 // 工作台点"确认下发"后才置 false 并可派发。手工录入默认 false。
 // ============ 一站式下单接口（工程侧保证落库，AI 只传参） ============
+// POST /scope-judge：覆盖范围判定（2026-11-16 新增）
+// 目的：AI 判断「一个区域要不要拆单」时，不必自己查卫星清单再算——
+// 一条命令直接返回判定结论、依据数值、可用卫星统计，以及拆的话会拆几条。
+// 与 order-intake 内部使用的是同一套判定逻辑，保证口径一致。
+dispatchApi.post("/scope-judge", async (req, res) => {
+  const b = req.body ?? {};
+  const coords = b.coords ?? b.geom?.coords;
+  if (!Array.isArray(coords) || coords.length < 3)
+    return res.status(400).json({ error: "需要 coords 数组（≥3 个 [lat,lon] 顶点）" });
+
+  const wantSar = String(b.obsType ?? 'optical').toLowerCase() === 'sar';
+  const tRes = Number(b.resolution) || 2;
+
+  // ① 区域尺寸
+  const lats = coords.map(c => c[0]), lons = coords.map(c => c[1]);
+  const cLat = (Math.max(...lats) + Math.min(...lats)) / 2;
+  const spanKmLat = Math.abs(Math.max(...lats) - Math.min(...lats)) * 110.57;
+  const spanKmLon = Math.abs(Math.max(...lons) - Math.min(...lons)) * 111.32 * Math.cos(cLat * Math.PI / 180);
+  const maxEdgeKm = Math.max(spanKmLat, spanKmLon);
+
+  // ② 可用卫星（类型匹配 + 分辨率满足 + 中国在轨）
+  const satRows = await pbAll("satellites", { filter: "decayed=0" });
+  const usable = [];
+  for (const s of satRows) {
+    const sub = String(s.subCategory ?? '').toLowerCase();
+    const typeOk = wantSar ? sub === 'sar' : ['optical', 'staring', 'hyperspectral'].includes(sub);
+    if (!typeOk || s.country !== '中国') continue;
+    const cap = getCapability(s);
+    if (cap?.resolution != null && cap.resolution > tRes * 1.2) continue;
+    usable.push({ name: s.name, operator: s.operator ?? s.country, subCategory: sub, cap });
+  }
+  // 按幅宽降序，取最宽
+  usable.sort((a, b2) => (b2.cap?.swathKm ?? 0) - (a.cap?.swathKm ?? 0));
+  const maxSwathKm = usable.length ? (usable[0].cap?.swathKm ?? 12) : 12;
+  const widestSat = usable[0] ?? null;
+
+  // ③ 判定
+  let needSplit, reason;
+  if (!usable.length) {
+    needSplit = false;
+    reason = `没有满足 ${wantSar ? 'SAR' : '光学'} + ${tRes}m 要求的中国在轨卫星，无法规划`;
+  } else if (maxEdgeKm <= maxSwathKm) {
+    needSplit = false;
+    reason = `区域长边 ${maxEdgeKm.toFixed(1)}km ≤ 最宽可用幅宽 ${maxSwathKm}km（${widestSat.name}），单星单次可完成`;
+  } else if (maxEdgeKm > 2 * maxSwathKm) {
+    needSplit = true;
+    reason = `区域长边 ${maxEdgeKm.toFixed(1)}km > 2×幅宽 ${(2 * maxSwathKm).toFixed(0)}km，必须拆`;
+  } else {
+    needSplit = true;
+    reason = `区域长边 ${maxEdgeKm.toFixed(1)}km 介于 1~2 倍幅宽 ${maxSwathKm}km，需侧摆跨带，保守按拆处理`;
+  }
+
+  // ④ 若需拆，预算拆几条（按最宽幅宽 + 15% 重叠）
+  let estStrips = 0, stripDetail = null;
+  if (needSplit && usable.length) {
+    try {
+      const plan = planAreaStrips(coords, { swathKm: maxSwathKm });
+      estStrips = plan.stats.stripCount;
+      stripDetail = {
+        swathKm: plan.stats.swathKm, stepKm: plan.stats.stepKm,
+        azimuthDeg: plan.direction.azimuthDeg,
+        widthKm: plan.stats.widthKm, heightKm: plan.stats.heightKm,
+        maxStripLenKm: plan.policy.maxStripLenKm,
+      };
+    } catch (e) { estStrips = Math.ceil(maxEdgeKm / maxSwathKm); }
+  }
+
+  res.json({
+    region: {
+      widthKm: +spanKmLon.toFixed(1), heightKm: +spanKmLat.toFixed(1),
+      maxEdgeKm: +maxEdgeKm.toFixed(1),
+    },
+    requirement: { obsType: wantSar ? 'sar' : 'optical', resolutionM: tRes },
+    satellites: {
+      usableCount: usable.length,
+      widest: widestSat ? { name: widestSat.name, operator: widestSat.operator, swathKm: widestSat.cap?.swathKm } : null,
+      top5BySwath: usable.slice(0, 5).map(u => ({ name: u.name, operator: u.operator, swathKm: u.cap?.swathKm, resM: u.cap?.resolution })),
+    },
+    judge: { needSplit, reason, estStrips, stripDetail },
+    nextStep: needSplit
+      ? `需要拆单：用 dispatch order-intake 建单，系统会自动拆成约 ${estStrips} 个独立任务（每任务一条带）`
+      : '不需拆单：直接用 dispatch order-intake 建 1 个任务',
+  });
+});
+
 // POST /order-intake：原子完成 新建任务→格式校验→确认→候选计算→回读断言。
 // 设计约束：1) 永远新建任务，禁止复用/改名旧任务 2) geom 格式错误立即 400（不静默）
 // 3) 幂等：同目标+同窗口的活跃任务存在时返回已有任务（防止AI重复建单）4) 返回前回读断言落库成功

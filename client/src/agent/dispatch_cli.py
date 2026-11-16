@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 9  # v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 10  # v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -377,7 +377,8 @@ def main():
                 "candidates <taskId>": "候选卫星计算（可见窗/约束/云量/排序，耗时较长）",
                 "order-intake <json>": "一站式下单（推荐）：传任务JSON，服务端原子完成建单+确认+候选+回读断言",
         "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
-                "sats [关键词]": "查卫星资源（按名称/类别/国家/运营商模糊匹配，如 sats 高分）",
+                "sats [关键词]": "查卫星资源（返回真实总数与按类型统计；可按名称/类别/国家/运营商筛选）",
+                "scope '<JSON>'": "覆盖范围判定（不写库）：输入区域多边形+观测类型+分辨率，返回「是否需拆单/拆几条/判定依据/最宽可用星」——判断拆不拆必须用它，不要自己查卫星清单算",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
         "delete <taskId>": "删除任务单（仅待派单/挂任务池状态；级联清理候选排序订单）",
@@ -390,20 +391,28 @@ def main():
         })
 
     elif cmd == "sats":
+        # 2026-11-16 修正：旧实现无关键词时只回 rows[:20]，且 LIMIT 50，
+        # 导致 AI 为查「1m 光学可用幅宽」反复翻页、误判"库里只有 20 颗旧卫星"。
+        # 现改为：返回真实总数 + 按观测类型/分辨率筛选，默认不截断到 20。
         kw = f"%{arg}%" if arg else None
+        base = """SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                         resolution, altitude, inclination, period
+                  FROM satellites WHERE decayed=0"""
         if kw:
-            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
-                         resolution, altitude, inclination, period, decayed
-                         FROM satellites WHERE (name LIKE ? OR country LIKE ? OR operator LIKE ?
-                         OR category LIKE ? OR payloadType LIKE ?) AND decayed=0
-                         ORDER BY noradId LIMIT 50""",
-                     (kw, kw, kw, kw, kw))
+            rows = q(base + """ AND (name LIKE ? OR country LIKE ? OR operator LIKE ?
+                         OR category LIKE ? OR subCategory LIKE ? OR payloadType LIKE ?)
+                         ORDER BY noradId LIMIT 500""",
+                     (kw, kw, kw, kw, kw, kw))
         else:
-            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
-                         resolution, altitude, inclination, period, decayed
-                         FROM satellites WHERE decayed=0 ORDER BY noradId LIMIT 50""")
-        out({"总数": len(rows), "卫星": rows if arg else rows[:20],
-             "提示": "传关键词缩小范围，如 dispatch sats 高分 / sats sar"})
+            rows = q(base + " ORDER BY noradId LIMIT 500")
+        # 按观测类型汇总（让 AI 一眼看出光学/SAR 各有多少颗）
+        by_type = {}
+        for r in rows:
+            k = str(r.get("subCategory") or "unknown")
+            by_type[k] = by_type.get(k, 0) + 1
+        out({"总数": len(rows), "按类型统计": by_type,
+             "卫星": rows if arg else rows[:50],
+             "提示": "传关键词筛选，如 dispatch sats optical / sats sar / sats 吉林"})
 
     elif cmd == "tasks":
         out(q("SELECT id, taskNo, taskName, targetName, obsType, resolution, priority, status, windowStart, windowEnd FROM tasks ORDER BY id DESC LIMIT 30"))
@@ -596,6 +605,17 @@ def main():
 
     elif cmd == "plans":
         out(q("SELECT id, taskId, satName, company, status, overpassTime FROM directPlans ORDER BY id DESC LIMIT 20"))
+
+    elif cmd == "scope" and arg:
+        # 覆盖范围判定（2026-11-16 新增）
+        # 解决「AI 为判断拆不拆，反复查卫星清单自己算」的低效问题：
+        # 一条命令直接返回「单星能否一次覆盖 / 需要拆几条 / 依据是什么」。
+        # 用法: dispatch scope '{"coords":[[lat,lon],...],"obsType":"optical","resolution":1}'
+        try:
+            body = json.loads(arg)
+        except Exception:
+            die("用法: dispatch scope '{\"coords\":[[lat,lon],...],\"obsType\":\"optical\",\"resolution\":1}'")
+        out(api_req("/scope-judge", "POST", body))
 
     elif cmd == "preflight" and arg:
         # 下单前预检（固化历次撞墙经验，秒级返回，不写库）：
