@@ -535,7 +535,23 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   // 候选范围：默认只取中国卫星（2026-11-15 按业务口径收紧）。
   // 历史行为：仅应急任务筛中国星，普通任务把 Sentinel/Pleiades/WorldView 等外国星也纳入候选，
   // 导致候选清单一堆境外星、且它们无法走国内测控与派单交付。
-  const scope = allSats.filter(s => s.country === '中国');
+  // 二次硬校验（2026-11-16）：sar 字段可能是脏值/大小写不一致，导致上面的 subCategory
+  // 过滤放行了错误类型。这里再用「任务 obsType」对「卫星实库类型」逐星核对一遍，
+  // 不匹配的直接剔除，保证写进候选表的每颗星都能真正执行该观测类型。
+  const scope = allSats.filter(s => s.country === '中国').filter(s => {
+    const sub = String(s.subCategory ?? '').toLowerCase();
+    if (wantSar) return sub === 'sar';
+    return ['optical', 'staring', 'hyperspectral'].includes(sub);
+  });
+  if (scope.length === 0) {
+    return res.json({ taskId: ref.oldId ?? ref.rid, strips: 0, candidates: 0, filtered: 0, ranked: 0,
+      gapStats: {}, planningDiagnosis: {
+        level: 'NO_SATELLITE_TYPE',
+        summary: `卫星库中没有可执行「${task.obsType === 'sar' ? 'SAR（雷达）' : '光学'}」观测的中国卫星`,
+        attribution: '候选范围按观测类型过滤后为空，说明卫星元数据 subCategory 标注有误或该类型无在轨资源',
+        suggestions: ['检查任务 obsType 是否正确', '核对卫星库 subCategory 标注', '改用另一种观测类型下单'],
+      } });
+  }
 
   // ── 条带宽度自适应（2026-11-15 修复：固定 12km 会显著高估条带数）────────────
   // 旧实现一律按 12km 幅宽切条带：30×30km 区域切成 4 条带，
@@ -1100,10 +1116,49 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     const cur = rkIndex.get(key);
     if (!cur || (rk.rank ?? 1e9) < (cur.rank ?? 1e9)) rkIndex.set(key, rk);
   }
+  // ── 观测类型硬校验（2026-11-16 用户报 PO-20261116-184）───────────────────
+  // 现象：SAR 任务被派给光学卫星 ZIYUAN 3-03，该星根本拍不了雷达图像。
+  // 根因：候选表里混进了光学星（历史数据在过滤生效前算出），而派单只看候选记录
+  // 和排名，从未校验"这颗星的实际载荷类型是否符合任务要求"。
+  // 修法：派单前按卫星实库的 subCategory 二次过滤，类型不符一律不派并记录原因。
+  const wantSar = task.obsType === 'sar';
+  const satTypeById = new Map();
+  try {
+    const allSatRows = await pbAll("satellites", { filter: "decayed=0" });
+    for (const st of allSatRows) {
+      satTypeById.set(String(st.noradId ?? st.name), st.subCategory);
+      satTypeById.set(st.name, st.subCategory);
+    }
+  } catch (e) { console.error('[dispatch] 读取卫星类型失败:', e.message); }
+  const typeMatches = (satName, noradId) => {
+    const sub = satTypeById.get(satName) ?? satTypeById.get(String(noradId)) ?? null;
+    if (!sub) return { ok: false, reason: `卫星 ${satName} 类型未知，拒绝派单` };
+    if (wantSar) {
+      return sub === 'sar' ? { ok: true } : { ok: false, reason: `${satName} 是 ${sub} 卫星，不能执行 SAR 任务` };
+    }
+    return ['optical', 'staring', 'hyperspectral'].includes(sub)
+      ? { ok: true }
+      : { ok: false, reason: `${satName} 是 ${sub} 卫星，不能执行光学任务` };
+  };
+
   const stripGroups = new Map();
+  const typeRejected = [];
   for (const a of plan.assignments) {
     const rk = rkIndex.get(`${a.stripIdx}|${a.satName}`);
-    if (rk) stripGroups.set(a.stripIdx, rk);
+    if (!rk) continue;
+    const chk = typeMatches(rk.satName, rk.satNoradId);
+    if (!chk.ok) { typeRejected.push({ stripId: a.stripIdx, satName: rk.satName, reason: chk.reason }); continue; }
+    stripGroups.set(a.stripIdx, rk);
+  }
+  // 严格模式：类型不符的候选全部剔除后若一条都不剩，直接拒绝派单并给出原因，
+  // 绝不"降级把任务派给拍不了的星"。
+  if (stripGroups.size === 0 && typeRejected.length > 0) {
+    return res.status(422).json({
+      error: '无类型匹配的可用候选，拒绝派单',
+      detail: `任务要求 ${task.obsType === 'sar' ? 'SAR（雷达）' : '光学'} 成像，但候选里的卫星类型全都不符`,
+      rejected: typeRejected.slice(0, 20),
+      suggestion: '请重新执行候选计算（候选会按观测类型重新筛选），或检查任务 obsType 是否填错',
+    });
   }
   const coveredIdx = [...stripGroups.keys()].sort((a, b) => a - b);
   const gapByStrip = new Map((plan.gaps ?? []).map(g => [g.stripId, g.reason]));
@@ -1148,7 +1203,11 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
       coveragePct: totalStrips ? +((coveredIdx.length / totalStrips) * 100).toFixed(1) : 100,
       orders: createdOrders,
       uncoveredStrips: uncoveredIdx,
-      gapReasons: uncoveredIdx.map(i => ({ stripId: i, reason: gapByStrip.get(i) ?? '无可用候选' })),
+      gapReasons: uncoveredIdx.map(i => {
+        const rej = typeRejected.find(r => r.stripId === i);
+        return { stripId: i, reason: rej?.reason ?? gapByStrip.get(i) ?? '无可用候选' };
+      }),
+      typeRejected,
       satelliteCount: plan.stats.satelliteCount,
       satellites: plan.satellites,
       multiSatellitePlan: true,
