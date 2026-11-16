@@ -444,18 +444,37 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
   catch (e) { if (e.status === 404) return res.status(404).json({ error: 'task not found' }); throw e; }
   t.id = ref.oldId ?? ref.rid;
   t.geom = JSON.parse(t.geom ?? "{}");
-  // P1-4 修复：任务详情也要带区域规划信息，供前端表单回显"这条任务覆盖什么区域、拆成几条带"
+  // 任务详情带区域规划信息（2026-11-16 增强）
+  // 用户要求：详情里必须能看到「四个顶点坐标是什么、条带怎么表达」。
+  // 旧实现只给 stripCount 等概要，且幅宽写死 12km（与判定口径不符）。
+  // 现改为：按任务实际分辨率推导规划幅宽 + 返回每条带的几何（起点/终点/宽长/方位）。
   if (t.geomType !== 'point' && t.geom?.coords) {
     try {
-      const ap = planTaskArea({ geomType: t.geomType, geom: JSON.stringify(t.geom) }, 12);
+      let swathKm = 12;
+      try {
+        const satRows = await pbAll("satellites", { filter: "decayed=0" });
+        const sw = deriveUsableSwath(satRows, t.obsType, t.resolution);
+        if (sw?.swathKm) swathKm = sw.swathKm;
+      } catch {}
+      const ap = planTaskArea({ geomType: t.geomType, geom: JSON.stringify(t.geom) }, swathKm);
       if (ap) t.areaPlan = {
         scale: ap.scaleLabel, strategy: ap.policy.note, stripCount: ap.stats.stripCount,
         direction: ap.direction, areaKm2: ap.stats.polygonAreaKm2,
+        stripAreaKm2: ap.stats.totalStripAreaKm2,
         redundancyPct: ap.stats.redundancyPct,
         bboxKm: { width: ap.stats.widthKm, height: ap.stats.heightKm },
-        swathKm: ap.stats.swathKm, overlapPct: +(ap.policy.overlapRate * 100).toFixed(1),
+        swathKm: ap.stats.swathKm, stepKm: ap.stats.stepKm,
+        overlapPct: +(ap.policy.overlapRate * 100).toFixed(1),
+        // 每条带的具体覆盖范围（前端要展示"条带怎么表达"）
+        strips: (ap.strips || []).map(st => ({
+          idx: st.idx,
+          center: [st.lat, st.lon],
+          start: st.start, end: st.end,
+          widthKm: st.widthKm, lengthKm: st.lengthKm,
+          areaKm2: st.areaKm2, azimuthDeg: st.azimuthDeg,
+        })),
       };
-    } catch {}
+    } catch (e) { console.error('[task-detail] 区域规划计算失败:', e.message); }
   }
   if (!t.createdAt) t.createdAt = "0000-00-00 00:00:00";
   // rankings：旧 SQL 为 rankings JOIN candidates（候选字段平铺），PB 侧用 expand=candidate 组装
