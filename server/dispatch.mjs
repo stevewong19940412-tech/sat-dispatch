@@ -713,8 +713,19 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           stripCoverage: r.stripCoverage, imgWinStart: r.imgWinStart, imgWinEnd: r.imgWinEnd,
         });
       }
-      const allStrips = strips.map(st => ({ idx: st.idx, widthKm: st.widthKm ?? swathForPlan,
-        lengthKm: st.lengthKm ?? 0, start: st.start, end: st.end }));
+      // 点目标没有 start/end（只有中心点坐标），这里补成同点，避免下游解构 undefined 抛错
+      // （曾导致点目标 candidates 稳定 503 "undefined is not iterable"）
+      const allStrips = strips.map(st => {
+        const lat = st.lat ?? st.start?.[0] ?? 0;
+        const lon = st.lon ?? st.start?.[1] ?? 0;
+        return {
+          idx: st.idx,
+          widthKm: st.widthKm ?? swathForPlan,
+          lengthKm: st.lengthKm ?? 0,
+          start: st.start ?? [lat, lon],
+          end: st.end ?? [lat, lon],
+        };
+      });
       const split = shouldSplitOrder(allStrips, candByStrip, { minCoverage: 0.85 });
       const multi = dispatchAcrossSatellites(allStrips, candByStrip, { minCoverage: 0.85 });
       coveragePlan.multiSatellite = {

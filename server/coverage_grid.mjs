@@ -46,8 +46,10 @@ function haversineKm(lat1, lon1, lat2, lon2) {
  * @returns {{pts:Array<[number,number]>, nx:number, ny:number, coarse:boolean}}
  */
 export function gridPointsInStrip(strip, gridKm) {
-  const [latS, lonS] = strip.start;
-  const [latE, lonE] = strip.end;
+  // 容错：调用方可能只给中心点（点目标），此时 start/end 缺失
+  const c0 = strip.lat != null ? [strip.lat, strip.lon] : null;
+  const [latS, lonS] = strip.start ?? c0 ?? [0, 0];
+  const [latE, lonE] = strip.end ?? c0 ?? [latS, lonS];
   const widthKm = strip.widthKm ?? 12;
   let lenKm = haversineKm(latS, lonS, latE, lonE);
   // 点目标：start/end 相同或缺失 → 条带长度为 0，网格数会算成 0 导致空迭代。
