@@ -207,7 +207,14 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     const removedAll = [];
     for (const [, list] of bySat) {
       if (list.length < 2) continue;
-      list.sort((x, y) => new Date(x.overpass) - new Date(y.overpass));
+      // 排序键必须是成像窗起点（聚簇判据也是窗重叠）。
+      // 用 overpass 排序时，某条 overpass 较晚但窗与前面重叠的条带会排在中间，
+      // 打断聚簇的连续性 → 同一过顶被切成两段（实测 9 条带窗完全重叠却被拆开）。
+      list.sort((x, y) => {
+        const xs = x.imgWinStart ? new Date(x.imgWinStart).getTime() : new Date(x.overpass).getTime();
+        const ys = y.imgWinStart ? new Date(y.imgWinStart).getTime() : new Date(y.overpass).getTime();
+        return xs - ys;
+      });
       // 聚簇（2026-11-16 修正）：判据必须是「成像窗是否重叠」，不是 overpass 间隔。
       // 同一次过顶的多条带 overpass 可能相差几百秒（不同侧摆的最近点不同），
       // 用 overpass 间隔聚簇会把一次过顶拆成多个"小簇"，每簇都各自不超载，
