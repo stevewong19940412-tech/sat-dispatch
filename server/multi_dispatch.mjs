@@ -207,45 +207,34 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     const removedAll = [];
     for (const [, list] of bySat) {
       if (list.length < 2) continue;
-      // 排序键必须是成像窗起点（聚簇判据也是窗重叠）。
-      // 用 overpass 排序时，某条 overpass 较晚但窗与前面重叠的条带会排在中间，
-      // 打断聚簇的连续性 → 同一过顶被切成两段（实测 9 条带窗完全重叠却被拆开）。
-      list.sort((x, y) => {
-        const xs = x.imgWinStart ? new Date(x.imgWinStart).getTime() : new Date(x.overpass).getTime();
-        const ys = y.imgWinStart ? new Date(y.imgWinStart).getTime() : new Date(y.overpass).getTime();
-        return xs - ys;
-      });
-      // 聚簇（2026-11-16 修正）：判据必须是「成像窗是否重叠」，不是 overpass 间隔。
-      // 同一次过顶的多条带 overpass 可能相差几百秒（不同侧摆的最近点不同），
-      // 用 overpass 间隔聚簇会把一次过顶拆成多个"小簇"，每簇都各自不超载，
-      // 合起来却远超该次过顶的可用时长——这正是超载簇漏裁的根因。
-      const clusters = [];
-      let cur = [list[0]];
-      const winOf = (a) => [
-        a.imgWinStart ? new Date(a.imgWinStart).getTime() : null,
-        a.imgWinEnd ? new Date(a.imgWinEnd).getTime() : null,
-      ];
-      let [curWs, curWe] = winOf(list[0]);
-      for (let i = 1; i < list.length; i++) {
-        const [ws, we] = winOf(list[i]);
-        // 与当前簇的时间范围有交叠（或任一缺窗口时按 overpass 近邻）→ 归入同簇
-        let sameCluster;
-        if (curWs != null && ws != null && curWe != null && we != null) {
-          sameCluster = ws <= curWe && we >= curWs;
+      // 排序：按成像窗起点（缺窗口时用 overpass），保证同一次过顶的条带相邻。
+      const tOf = (a) => (a.imgWinStart ? new Date(a.imgWinStart).getTime() : new Date(a.overpass).getTime());
+      list.sort((x, y) => tOf(x) - tOf(y));
+
+      // 聚簇（2026-11-16 三次修正）：先把所有条带的成像窗完全展开，再求窗口的连通分量。
+      // 前两次都错在"边扫边比较"——排序后只要有一条的窗起点晚于当前簇的最早窗终点，
+      // 就会把后面窗完全重叠的条带切断（实测 9 条同窗带被拆成 3+6）。
+      // 正确做法：按窗区间做「区间合并」，落在同一连通区间的条带即同一次过顶。
+      const ranges = list.map((a, i) => {
+        const ws = a.imgWinStart ? new Date(a.imgWinStart).getTime() : new Date(a.overpass).getTime();
+        const we = a.imgWinEnd ? new Date(a.imgWinEnd).getTime() : ws + 60000;
+        return { i, ws, we };
+      }).sort((x, y) => x.ws - y.ws);
+
+      const components = [];   // 每组是 list 的下标集合
+      let group = [], groupEnd = -Infinity;
+      for (const r of ranges) {
+        if (group.length && r.ws <= groupEnd) {
+          group.push(r.i);
+          groupEnd = Math.max(groupEnd, r.we);
         } else {
-          sameCluster = new Date(list[i].overpass) - new Date(list[i - 1].overpass) < 600000;
-        }
-        if (sameCluster) {
-          cur.push(list[i]);
-          if (ws != null) curWs = curWs == null ? ws : Math.min(curWs, ws);
-          if (we != null) curWe = curWe == null ? we : Math.max(curWe, we);
-        } else {
-          clusters.push(cur);
-          cur = [list[i]];
-          [curWs, curWe] = winOf(list[i]);
+          if (group.length) components.push(group);
+          group = [r.i];
+          groupEnd = r.we;
         }
       }
-      clusters.push(cur);
+      if (group.length) components.push(group);
+      const clusters = components.map(g => g.map(i => list[i]));
 
       for (const cl of clusters) {
         if (cl.length < 2) continue;
