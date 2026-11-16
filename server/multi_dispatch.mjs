@@ -28,6 +28,8 @@
 
 import { coverageGrade } from './coverage_grid.mjs';
 
+export const BUILD_TAG = 'multi_dispatch@2026-11-16-cluster-merge';  // 部署校验用
+
 /**
  * 判断两个成像任务在同一颗星上是否时间冲突（2026-11-16 重写）。
  *
