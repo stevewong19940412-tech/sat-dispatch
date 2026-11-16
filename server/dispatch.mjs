@@ -491,7 +491,12 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
         Math.abs(Math.max(...lats) - Math.min(...lats)) * 111,
         Math.abs(Math.max(...lons) - Math.min(...lons)) * 111 * Math.cos(geomObj.coords[0][0] * Math.PI / 180)
       );
-      swathForPlan = Math.max(12, Math.min(maxSwath, Math.max(12, spanKm * 1.2)));
+      // 条带宽度 = 传感器幅宽，不能按区域大小放大。
+      // 之前写成 min(maxSwath, spanKm*1.2)，对小区域正确（避免幅宽远大于目标），
+      // 但对大区域会把幅宽放大到上百 km，导致条带数骤减、每个条带都过长，
+      // 与"单条带 ≤100km"的分段策略冲突（北京全域一度只切出 6 条带）。
+      // 正确口径：取满足分辨率要求的最大幅宽，但不超过区域短边（避免一条带盖不满）。
+      swathForPlan = Math.max(12, Math.min(maxSwath, Math.max(12, spanKm)));
     }
   } catch {}
   const strips = normalizeTaskStrips(task, swathForPlan);
