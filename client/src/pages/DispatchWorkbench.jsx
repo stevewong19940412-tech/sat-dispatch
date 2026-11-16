@@ -621,13 +621,22 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
             <>
               <div className="section-label">候选卫星优先级排序</div>
               <table className="mission-table" style={{ fontSize: 11.5 }}>
-                <thead><tr><th>#</th><th>卫星</th><th>公司</th><th>过顶时刻</th><th>侧摆</th><th>云量</th><th>太阳角</th><th>可用度</th><th>优先级评分</th></tr></thead>
+                <thead><tr><th>#</th><th>条带</th><th>卫星</th><th>公司</th><th>覆盖率</th><th>过顶时刻</th><th>侧摆</th><th>云量</th><th>太阳角</th><th>可用度</th><th>优先级评分</th></tr></thead>
                 <tbody>
                   {selected.rankings.slice(0, 12).map(r => (
                     <tr key={r.id}>
                       <td style={{ color: r.rank === 1 ? 'var(--accent)' : 'var(--text-dim)', fontWeight: r.rank === 1 ? 700 : 400 }}>{r.rank}</td>
+                      <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>{r.stripIdx ?? '—'}</td>
                       <td style={{ color: 'var(--text-bright)' }}>{r.satName}</td>
                       <td>{r.company}</td>
+                      {/* 覆盖率：派单最先看这个。0 表示这颗星几何上拍不到这条带，
+                          排名再高也不会被选中——此前不显示导致"排第一却没派它"的困惑 */}
+                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 600,
+                                   color: r.stripCoverage == null ? 'var(--text-dim)'
+                                        : r.stripCoverage < 0.01 ? 'var(--danger)'
+                                        : r.stripCoverage >= 0.85 ? 'var(--accent)' : 'var(--warning, #e6a23c)' }}>
+                        {r.stripCoverage == null ? '—' : `${(r.stripCoverage * 100).toFixed(0)}%`}
+                      </td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5 }}>{r.overpassTime?.slice(5, 16)}</td>
                       <td style={{ fontFamily: 'var(--font-mono)' }}>{r.slewDeg?.toFixed(0)}°</td>
                       <td style={{ fontFamily: 'var(--font-mono)' }} title={r.cloudSource === 'real' ? '真实气象预报 (open-meteo)' : '内置模拟气象场（超出72h预报窗）'}>

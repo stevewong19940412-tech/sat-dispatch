@@ -488,6 +488,9 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
       wStart: c.windowStart, wEnd: c.windowEnd, overpassTime: c.overpassTime,
       slewDeg: c.slewDeg, availability: c.availability, cloudFc: c.cloudFc, cloudSource: c.cloudSource,
       orbitGrade: c.orbitGrade, stripIdx: c.stripIdx, stripCount: c.stripCount, minDistKm: c.minDistKm,
+      // 覆盖率必须返回：派单排序最先看 stripCoverage（0=几何上拍不到该条带），
+      // 前端不显示它就会产生"排名第一却没派它"的困惑（PO-20261116-205）
+      stripCoverage: c.stripCoverage,
       imgWinStart: c.imgWinStart, imgWinEnd: c.imgWinEnd, sunElDeg: c.sunElDeg,
     };
   });

@@ -144,6 +144,16 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     // 导致界面上排第一（S=79.6）的候选不一定被选中，实际可能派给排名 400+ 的劣质候选。
     // 现在的优先级：能排入 > 排名靠前（rank 小）> 条带覆盖率高 > 过顶时间早。
     const ordered = [...candidates].sort((x, y) => {
+      // ⓪ 覆盖率优先（2026-11-16 修正）
+      // 实测 PO-20261116-205：条带1 的 rank1/rank2 覆盖率为 0（几何上拍不到这条带），
+      // rank4 覆盖率 100%。旧排序先比 rank、覆盖率只作第三关键字，
+      // 导致"排名第一却拍不到"的候选排在真正可用的候选前面，
+      // 用户看到的就是"排第一的航天宏图没被选，却派给了资源卫星中心"。
+      // 覆盖率为 0 的候选物理上无法完成该条带，必须整体排到最后。
+      const cx = x.stripCoverage ?? 0, cy = y.stripCoverage ?? 0;
+      const zx = cx > 0.01 ? 0 : 1, zy = cy > 0.01 ? 0 : 1;
+      if (zx !== zy) return zx - zy;                       // 能覆盖的优先
+
       const tx = satTimeline.get(x.satName) ?? [];
       const ty = satTimeline.get(y.satName) ?? [];
       const fx = tx.some(t => conflicts(t, x, opt)) ? 1 : 0;
@@ -151,9 +161,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       if (fx !== fy) return fx - fy;                       // ① 可排入的优先
       const rx = x.rank ?? 1e9, ry = y.rank ?? 1e9;
       if (rx !== ry) return rx - ry;                        // ② 排名靠前优先（S 高）
-      if (Math.abs((y.stripCoverage ?? 0) - (x.stripCoverage ?? 0)) > 0.02) {
-        return (y.stripCoverage ?? 0) - (x.stripCoverage ?? 0);   // ③ 覆盖率高优先
-      }
+      if (Math.abs(cy - cx) > 0.02) return cy - cx;         // ③ 覆盖率高优先
       return new Date(x.overpass) - new Date(y.overpass);   // ④ 时间早优先
     });
     let picked = null;
