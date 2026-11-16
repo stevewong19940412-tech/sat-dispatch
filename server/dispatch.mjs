@@ -917,8 +917,10 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
     .reduce((mx, c) => Math.max(mx, c.stripIdx ?? 1), 1);
+  // 条带定义要带长度：冲突判定按「条带长 ÷ 地面速度」估算实际成像时长
+  const stripLenByIdx = new Map(strips.map(st => [st.idx, st.lengthKm ?? 60]));
   const allStripDefs = [];
-  for (let i = 1; i <= totalStrips; i++) allStripDefs.push({ idx: i });
+  for (let i = 1; i <= totalStrips; i++) allStripDefs.push({ idx: i, lengthKm: stripLenByIdx.get(i) ?? 60 });
 
   const plan = dispatchAcrossSatellites(allStripDefs, candByStrip, { minCoverage: 0.85 });
   // 用条带号 + 卫星名回查原始 ranking 记录（订单要写 satNoradId/rank 等字段）

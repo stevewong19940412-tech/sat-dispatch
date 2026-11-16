@@ -65,11 +65,19 @@ function conflicts(a, b, opt = {}) {
     const need = Math.abs((a.slewDeg ?? 0) - (b.slewDeg ?? 0)) / slewRate + stabilize;
     return gap < need;
   }
-  // 情况2：成像窗重叠 —— 敏捷星可在同一次过顶连续侧摆，但若两任务成像时段
-  // 真正交叠（同一时刻要求指向两个方向），则冲突。
-  // 容差：成像动作极短（数秒~数十秒），允许 2s 的窗交叠（连续推扫换带）。
-  const overlap = Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
-  return overlap > 2000;
+  // 情况2：成像窗重叠 —— 这是最常见的同轨多条带拼幅场景。
+  // 关键认识：imgWin 是「该条带可成像的时间范围」（几十秒~几分钟），
+  // 并不代表要占用整个窗口。实际成像只需走完条带长度：
+  //   条带长 60km ÷ 地面速度 6.83km/s ≈ 9 秒
+  // 因此同一过顶内可以顺序拍多个条带，只要「前一带拍完 + 机动 + 稳定」能赶上后一带。
+  // 旧判据 overlap>2s 即冲突，把整段窗口当成占用时间，导致同轨多带全被排除。
+  const lenA = a.lengthKm ?? 60, lenB = b.lengthKm ?? 60;
+  const durA = Math.min((aEnd - aStart) / 1000, Math.max(5, lenA / 6.83));
+  const durB = Math.min((bEnd - bStart) / 1000, Math.max(5, lenB / 6.83));
+  const maneuver = Math.abs((a.slewDeg ?? 0) - (b.slewDeg ?? 0)) / slewRate + stabilize;
+  // 两带实际成像时长 + 机动时间之和，是否超过窗口可用跨度
+  const span = Math.max(aEnd, bEnd) - Math.min(aStart, bStart);
+  return (durA + durB + maneuver) * 1000 > span;
 }
 
 /**
@@ -103,6 +111,8 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
         if (Math.abs(a.slewDeg - b.slewDeg) > 2) return a.slewDeg - b.slewDeg;
         return new Date(a.overpass) - new Date(b.overpass);
       });
+    // 给每个候选取用本条带的长度（冲突判定需要估算实际成像时长）
+    for (const c of list) c.lengthKm = st.lengthKm ?? c.lengthKm ?? 60;
     pool.push({ strip: st, candidates: list });
   }
 
@@ -212,7 +222,7 @@ export function shouldSplitOrder(strips, candByStrip, opt = {}) {
       if (!satCovers.has(c.satName)) satCovers.set(c.satName, []);
       satCovers.get(c.satName).push({
         stripIdx: st.idx, overpass: c.overpass, slewDeg: c.slewDeg,
-        imgStart: c.imgWinStart, imgEnd: c.imgWinEnd,
+        imgStart: c.imgWinStart, imgEnd: c.imgWinEnd, lengthKm: st.lengthKm,
       });
     }
   }
