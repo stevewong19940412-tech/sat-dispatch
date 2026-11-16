@@ -759,6 +759,11 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       coveragePlan.scheduled = ms.assignedStrips;
       coveragePlan.unscheduled = ms.totalStrips - ms.assignedStrips;
       coveragePlan.coverageBasis = '按多星分派方案实际可执行条带数';
+      // 用分派方案覆盖旧的 gaps / partialStrips（修复：旧逻辑说 33 条"无可用过顶"，
+      // 而这些条带在分派方案里已 100% 分派，两套结论互相矛盾）。
+      coveragePlan.gaps = ms.gaps ?? [];
+      coveragePlan.partialStrips = [];
+      coveragePlan.legacyNote = 'gaps/partialStrips 已与 multiSatellite 方案对齐';
     } catch (e) {
       console.error('[multi-dispatch] 分派失败:', e.message);
     }

@@ -147,10 +147,23 @@ export function planAreaStrips(coords, opt = {}) {
   const azimuth = groundTrackAzimuth(incDeg, cLat);
   const azDeg = (azimuth / DEG);
 
-  // ── 在旋转坐标系中切片：把轨迹方向对齐到 y 轴（旋转 -azimuth）──
-  const cosA = Math.cos(-azimuth), sinA = Math.sin(-azimuth);
-  const rot = poly.map(([x, y]) => [x * cosA - y * sinA, x * sinA + y * cosA]);
-  const rotInv = ([u, v]) => [u * Math.cos(azimuth) - v * Math.sin(azimuth), u * Math.sin(azimuth) + v * Math.cos(azimuth)];
+  // ── 在旋转坐标系中切片：把轨迹方向对齐到 v 轴 ──
+  // 旋转 R(θ) 把 (x,y) → (u,v)，θ = azimuth 使轨迹方向落到 v 轴：
+  //   u =  x·cosθ + y·sinθ
+  //   v = -x·sinθ + y·cosθ
+  // 逆变换（v 轴回到原坐标）：
+  //   x = u·cosθ - v·sinθ
+  //   y = u·sinθ + v·cosθ
+  // 历史 bug：正向与逆向用了同一套符号，导致条带方向被镜像
+  // （实测条带 −> +10.25°，而轨道是 −10.37°，差 20° → 条带与轨道不平行）。
+  // 数学推导（已单测验证）：
+  //   轨迹方向单位向量 (dx,dy) = (sinθ, cosθ)，θ = azimuth
+  //   需找旋转角 φ 使结果落在 v 轴：u = dx·cosφ + dy·sinφ = sin(θ+φ) = 0 → φ = -θ
+  //   故正向旋转用 φ = -azimuth（用 +azimuth 会得到 u=-0.354，未对齐 → 条带被镜像）。
+  const th = -azimuth;
+  const cosA = Math.cos(th), sinA = Math.sin(th);
+  const rot = poly.map(([x, y]) => [x * cosA + y * sinA, -x * sinA + y * cosA]);
+  const rotInv = ([u, v]) => [u * cosA - v * sinA, u * sinA + v * cosA];
 
   // 沿垂直轨迹方向（旋转后的 u 轴）推进
   const step = swathKm * (1 - policy.overlapRate);

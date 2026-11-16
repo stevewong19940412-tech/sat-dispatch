@@ -72,10 +72,13 @@ function conflicts(a, b, opt = {}) {
   // 因此同一过顶内可以顺序拍多个条带，只要「前一带拍完 + 机动 + 稳定」能赶上后一带。
   // 旧判据 overlap>2s 即冲突，把整段窗口当成占用时间，导致同轨多带全被排除。
   const lenA = a.lengthKm ?? 60, lenB = b.lengthKm ?? 60;
-  const durA = Math.min((aEnd - aStart) / 1000, Math.max(5, lenA / 6.83));
-  const durB = Math.min((bEnd - bStart) / 1000, Math.max(5, lenB / 6.83));
+  // 实际成像时长 = 条带长度 ÷ 星下点地面速度（6.83 km/s），不设上限截断。
+  // 历史 bug：这里用 Math.min(窗口跨度, 条带时长) 把时长截断到窗口内，
+  // 导致「33 条带共 1972km（需 286 秒）被判能塞进 21 秒过顶」的物理不可能方案。
+  const durA = Math.max(1, lenA / 6.83);
+  const durB = Math.max(1, lenB / 6.83);
   const maneuver = Math.abs((a.slewDeg ?? 0) - (b.slewDeg ?? 0)) / slewRate + stabilize;
-  // 两带实际成像时长 + 机动时间之和，是否超过窗口可用跨度
+  // 两带占用时间（成像 + 机动）之和不得超过它们在窗口内的可用跨度
   const span = Math.max(aEnd, bEnd) - Math.min(aStart, bStart);
   return (durA + durB + maneuver) * 1000 > span;
 }
@@ -182,6 +185,55 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       imgWinStart: picked.imgWinStart,
       imgWinEnd: picked.imgWinEnd,
     });
+  }
+
+  // ── 步骤2.5：整体可行性复核（2026-11-16 新增）────────────────────────
+  // 逐条冲突检查只能保证"两两"不冲突，仍可能出现"很多条带累计成像时长
+  // 超过一次过顶可用时长"的方案（实测曾有 33 条带 1972km 挤在 21 秒内）。
+  // 这里按星复核：同一过顶簇内，Σ成像时长 + Σ机动 ≤ 簇跨度，否则裁掉超出的条带。
+  {
+    const bySat = new Map();
+    for (const a of assignments) {
+      if (!bySat.has(a.satName)) bySat.set(a.satName, []);
+      bySat.get(a.satName).push(a);
+    }
+    const removed = [];
+    for (const [satName, list] of bySat) {
+      if (list.length < 2) continue;
+      list.sort((x, y) => new Date(x.overpass) - new Date(y.overpass));
+      // 按过顶时刻聚簇：间隔 < 10 分钟的算同一次过顶
+      const clusters = [];
+      let cur = [list[0]];
+      for (let i = 1; i < list.length; i++) {
+        const gap = new Date(list[i].overpass) - new Date(list[i - 1].overpass);
+        if (gap < 600000) cur.push(list[i]);
+        else { clusters.push(cur); cur = [list[i]]; }
+      }
+      clusters.push(cur);
+      for (const cl of clusters) {
+        if (cl.length < 2) continue;
+        const spanSec = (new Date(cl[cl.length - 1].overpass) - new Date(cl[0].overpass)) / 1000;
+        // 该簇可用时长 = 跨度 + 单条带典型可拍时长（过顶窗口本身有长度）
+        const availSec = Math.max(spanSec, 0) + 60;
+        let used = 0;
+        const kept = [];
+        for (let i = 0; i < cl.length; i++) {
+          const need = (cl[i].stripLengthKm ?? 60) / 6.83 + (i > 0 ? 12 : 0);
+          if (used + need > availSec) { removed.push(cl[i]); continue; }
+          used += need; kept.push(cl[i]);
+        }
+        if (kept.length !== cl.length) {
+          for (const r of removed) {
+            const idx = assignments.indexOf(r);
+            if (idx >= 0) assignments.splice(idx, 1);
+          }
+        }
+      }
+    }
+    // 被裁掉的条带补回 gaps（给真实原因）
+    for (const r of removed) {
+      gaps.push({ stripId: r.stripIdx, reason: `单次过顶内成像时长不足（该星该过顶已排满）` });
+    }
   }
 
   // ── 步骤3：汇总 ──
