@@ -63,7 +63,8 @@ import {
 import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
-import { summarizeCoveragePlan } from "./strip_planner.mjs";
+import { summarizeCoveragePlan, planAreaStrips } from "./strip_planner.mjs";
+import { judgeArea, regionSize, deriveUsableSwath } from "./area_judge.mjs";
 import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
 import { coverageGrade } from "./coverage_grid.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
@@ -109,85 +110,29 @@ dispatchApi.post("/tasks/:id/revoke", async (req, res) => {
 // 目的：AI 判断「一个区域要不要拆单」时，不必自己查卫星清单再算——
 // 一条命令直接返回判定结论、依据数值、可用卫星统计，以及拆的话会拆几条。
 // 与 order-intake 内部使用的是同一套判定逻辑，保证口径一致。
+// POST /scope-judge：覆盖范围判定（2026-11-16）
+// 统一由 server/area_judge.mjs 的 judgeArea 裁决，与建单完全同一套逻辑，
+// 杜绝「接口估算一套、建单拆一套」的口径分叉。
 dispatchApi.post("/scope-judge", async (req, res) => {
   const b = req.body ?? {};
   const coords = b.coords ?? b.geom?.coords;
-  if (!Array.isArray(coords) || coords.length < 3)
-    return res.status(400).json({ error: "需要 coords 数组（≥3 个 [lat,lon] 顶点）" });
+  const isPoint = b.geomType === 'point' || (!coords && (b.lat != null || b.lon != null));
 
-  const wantSar = String(b.obsType ?? 'optical').toLowerCase() === 'sar';
-  const tRes = Number(b.resolution) || 2;
+  if (!isPoint && (!Array.isArray(coords) || coords.length < 3))
+    return res.status(400).json({ error: "面目标需要 coords 数组（≥3 个 [lat,lon] 顶点）；点目标传 geomType=point" });
 
-  // ① 区域尺寸
-  const lats = coords.map(c => c[0]), lons = coords.map(c => c[1]);
-  const cLat = (Math.max(...lats) + Math.min(...lats)) / 2;
-  const spanKmLat = Math.abs(Math.max(...lats) - Math.min(...lats)) * 110.57;
-  const spanKmLon = Math.abs(Math.max(...lons) - Math.min(...lons)) * 111.32 * Math.cos(cLat * Math.PI / 180);
-  const maxEdgeKm = Math.max(spanKmLat, spanKmLon);
+  let satRows = [];
+  try { satRows = await pbAll("satellites", { filter: "decayed=0" }); }
+  catch (e) { return res.status(503).json({ error: '读取卫星库失败', detail: e.message }); }
 
-  // ② 可用卫星（类型匹配 + 分辨率满足 + 中国在轨）
-  const satRows = await pbAll("satellites", { filter: "decayed=0" });
-  const usable = [];
-  for (const s of satRows) {
-    const sub = String(s.subCategory ?? '').toLowerCase();
-    const typeOk = wantSar ? sub === 'sar' : ['optical', 'staring', 'hyperspectral'].includes(sub);
-    if (!typeOk || s.country !== '中国') continue;
-    const cap = getCapability(s);
-    if (cap?.resolution != null && cap.resolution > tRes * 1.2) continue;
-    usable.push({ name: s.name, operator: s.operator ?? s.country, subCategory: sub, cap });
-  }
-  // 按幅宽降序，取最宽
-  usable.sort((a, b2) => (b2.cap?.swathKm ?? 0) - (a.cap?.swathKm ?? 0));
-  const maxSwathKm = usable.length ? (usable[0].cap?.swathKm ?? 12) : 12;
-  const widestSat = usable[0] ?? null;
-
-  // ③ 判定
-  let needSplit, reason;
-  if (!usable.length) {
-    needSplit = false;
-    reason = `没有满足 ${wantSar ? 'SAR' : '光学'} + ${tRes}m 要求的中国在轨卫星，无法规划`;
-  } else if (maxEdgeKm <= maxSwathKm) {
-    needSplit = false;
-    reason = `区域长边 ${maxEdgeKm.toFixed(1)}km ≤ 最宽可用幅宽 ${maxSwathKm}km（${widestSat.name}），单星单次可完成`;
-  } else if (maxEdgeKm > 2 * maxSwathKm) {
-    needSplit = true;
-    reason = `区域长边 ${maxEdgeKm.toFixed(1)}km > 2×幅宽 ${(2 * maxSwathKm).toFixed(0)}km，必须拆`;
-  } else {
-    needSplit = true;
-    reason = `区域长边 ${maxEdgeKm.toFixed(1)}km 介于 1~2 倍幅宽 ${maxSwathKm}km，需侧摆跨带，保守按拆处理`;
-  }
-
-  // ④ 若需拆，预算拆几条（按最宽幅宽 + 15% 重叠）
-  let estStrips = 0, stripDetail = null;
-  if (needSplit && usable.length) {
-    try {
-      const plan = planAreaStrips(coords, { swathKm: maxSwathKm });
-      estStrips = plan.stats.stripCount;
-      stripDetail = {
-        swathKm: plan.stats.swathKm, stepKm: plan.stats.stepKm,
-        azimuthDeg: plan.direction.azimuthDeg,
-        widthKm: plan.stats.widthKm, heightKm: plan.stats.heightKm,
-        maxStripLenKm: plan.policy.maxStripLenKm,
-      };
-    } catch (e) { estStrips = Math.ceil(maxEdgeKm / maxSwathKm); }
-  }
-
-  res.json({
-    region: {
-      widthKm: +spanKmLon.toFixed(1), heightKm: +spanKmLat.toFixed(1),
-      maxEdgeKm: +maxEdgeKm.toFixed(1),
-    },
-    requirement: { obsType: wantSar ? 'sar' : 'optical', resolutionM: tRes },
-    satellites: {
-      usableCount: usable.length,
-      widest: widestSat ? { name: widestSat.name, operator: widestSat.operator, swathKm: widestSat.cap?.swathKm } : null,
-      top5BySwath: usable.slice(0, 5).map(u => ({ name: u.name, operator: u.operator, swathKm: u.cap?.swathKm, resM: u.cap?.resolution })),
-    },
-    judge: { needSplit, reason, estStrips, stripDetail },
-    nextStep: needSplit
-      ? `需要拆单：用 dispatch order-intake 建单，系统会自动拆成约 ${estStrips} 个独立任务（每任务一条带）`
-      : '不需拆单：直接用 dispatch order-intake 建 1 个任务',
+  const j = judgeArea({
+    coords: isPoint ? null : coords,
+    obsType: b.obsType ?? 'optical',
+    resolutionM: b.resolution ?? 2,
+    satRows,
+    isPoint,
   });
+  res.json(j);
 });
 
 // POST /order-intake：原子完成 新建任务→格式校验→确认→候选计算→回读断言。
@@ -252,46 +197,29 @@ dispatchApi.post("/order-intake", async (req, res) => {
   if (b.geomType !== "point" && Array.isArray(g.coords) && g.coords.length >= 3 && b.splitStrips !== false) {
     try {
       // ① 区域尺寸（km）
-      const lats = g.coords.map(c => c[0]), lons = g.coords.map(c => c[1]);
-      const cLat0 = (Math.max(...lats) + Math.min(...lats)) / 2;
-      const spanKmLat = Math.abs(Math.max(...lats) - Math.min(...lats)) * 110.57;
-      const spanKmLon = Math.abs(Math.max(...lons) - Math.min(...lons)) * 111.32 * Math.cos(cLat0 * Math.PI / 180);
-      const maxEdgeKm = Math.max(spanKmLat, spanKmLon);
-
-      // ② 满足分辨率要求的可用卫星里，最宽幅宽
-      const wantSar0 = b.obsType === 'sar';
-      const tRes = Number(b.resolution) || 2;
+      // ── 统一交给 area_judge 裁决（与 /scope-judge 接口同一套逻辑）──
+      // 关键：判定用的幅宽、条带数，必须与接口回报给 AI 的完全一致，
+      // 否则会出现「AI 说拆 7 条、实际拆 2 条」的口径分叉。
       const satRows0 = await pbAll("satellites", { filter: "decayed=0" });
-      const usable = satRows0.filter(s => {
-        const sub = String(s.subCategory ?? '').toLowerCase();
-        const typeOk = wantSar0 ? sub === 'sar' : ['optical', 'staring', 'hyperspectral'].includes(sub);
-        if (!typeOk || s.country !== '中国') return false;
-        const res = getCapability(s)?.resolution;
-        return res == null || res <= tRes * 1.2;
+      scopeJudge = judgeArea({
+        coords: g.coords,
+        obsType: b.obsType,
+        resolutionM: b.resolution,
+        satRows: satRows0,
+        isPoint: false,
       });
-      const caps0 = usable.map(x => getCapability(x)).filter(c => c?.swathKm);
-      const maxSwathKm = caps0.length ? Math.max(...caps0.map(c => c.swathKm)) : 12;
 
-      // ③④⑤ 判定
-      let needSplit, reason;
-      if (maxEdgeKm <= maxSwathKm) {
-        needSplit = false;
-        reason = `区域长边 ${maxEdgeKm.toFixed(1)}km ≤ 最宽可用幅宽 ${maxSwathKm}km，单星单次可完成`;
-      } else if (maxEdgeKm > 2 * maxSwathKm) {
-        needSplit = true;
-        reason = `区域长边 ${maxEdgeKm.toFixed(1)}km > 2×幅宽 ${(2*maxSwathKm).toFixed(0)}km，必须拆`;
+      if (!scopeJudge.needSplit) {
+        stripPlan = null;   // 不拆：走单任务路径
       } else {
-        needSplit = true;
-        reason = `区域长边 ${maxEdgeKm.toFixed(1)}km 介于 1~2 倍幅宽 ${maxSwathKm}km 之间，需侧摆跨带，保守按拆处理`;
-      }
-      scopeJudge = { maxEdgeKm: +maxEdgeKm.toFixed(1), maxSwathKm, needSplit, reason, usableSats: usable.length };
-
-      if (!needSplit) {
-        // 不拆：跳过条带规划，走单任务路径
-        stripPlan = null;
-      } else {
-        const planned = normalizeTaskStrips({ geomType: 'polygon', geom: JSON.stringify({ coords: g.coords }) }, maxSwathKm);
+        // 用判定得出的规划幅宽拆带，保证条带数与判定一致
+        const planned = normalizeTaskStrips(
+          { geomType: 'polygon', geom: JSON.stringify({ coords: g.coords }) },
+          scopeJudge.swath.swathKm
+        );
         if (planned.length > 1) stripPlan = planned;
+        // 条带数以实际规划结果为准（回写到判定里，避免两处数字打架）
+        if (stripPlan) scopeJudge.stripCount = stripPlan.length;
       }
     } catch (e) { console.error('[order-intake] 覆盖判定失败，按单任务处理:', e.message); }
   }
