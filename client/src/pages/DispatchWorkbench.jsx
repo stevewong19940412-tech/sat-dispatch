@@ -490,28 +490,129 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
           {(() => {
             const g = selected.geom ? (typeof selected.geom === 'string' ? JSON.parse(selected.geom) : selected.geom) : null;
             const topRank = selected.rankings?.[0];
+            const ap = selected.areaPlan || {};
+            const mono = { fontFamily: 'var(--font-mono)' };
+
+            // 面目标尺寸
+            let sizeInfo = null;
+            if (g?.coords) {
+              const lats = g.coords.map(c => c[0]), lons = g.coords.map(c => c[1]);
+              const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+              const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+              const cLat = (minLat + maxLat) / 2;
+              sizeInfo = {
+                wKm: (maxLon - minLon) * 111.32 * Math.cos(cLat * Math.PI / 180),
+                hKm: (maxLat - minLat) * 110.57,
+                minLat, maxLat, minLon, maxLon, cLat, cLon: (minLon + maxLon) / 2,
+                areaKm2: ap.areaKm2 ?? null,
+              };
+            }
+
             return (
-              <div style={{ margin: '10px 0', padding: '8px 12px', borderRadius: 4, background: 'rgba(45,212,167,0.05)', border: '1px solid rgba(45,212,167,0.25)' }}>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--accent)', marginBottom: 4 }}>成像目标 AOI（解算值）</div>
-                <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-bright)' }}>
-                  {g?.lat != null
-                    ? `点目标 ${Number(g.lat).toFixed(4)}°, ${Number(g.lon).toFixed(4)}°（单景覆盖）`
-                    : g?.coords ? (() => {
-                        const lats = g.coords.map(c=>c[0]); const lons = g.coords.map(c=>c[1]);
-                        const dLatKm = (Math.max(...lats)-Math.min(...lats)) * 111;
-                        const dLonKm = (Math.max(...lons)-Math.min(...lons)) * 111 * Math.cos(g.coords[0][0]*Math.PI/180);
-                        return `面目标 ${g.coords.length} 顶点（约 ${dLatKm.toFixed(0)}km × ${dLonKm.toFixed(0)}km），将拆 ${Math.ceil(Math.max(dLatKm,dLonKm)/12)} 条带覆盖`;
-                      })() : '—'}
-                </div>
+              <div style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 4, background: 'rgba(45,212,167,0.05)', border: '1px solid rgba(45,212,167,0.25)' }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--accent)', marginBottom: 6 }}>成像目标 AOI（解算值）</div>
+
+                {/* 点目标 */}
+                {g?.lat != null && (
+                  <div style={{ fontSize: 12, ...mono, color: 'var(--text-bright)' }}>
+                    点目标 &nbsp;纬度 {Number(g.lat).toFixed(5)}° &nbsp;经度 {Number(g.lon).toFixed(5)}°
+                    <span style={{ color: 'var(--text-dim)' }}>（单景覆盖）</span>
+                  </div>
+                )}
+
+                {/* 面目标 */}
+                {g?.coords && sizeInfo && (
+                  <>
+                    <div style={{ fontSize: 12, color: 'var(--text-bright)', marginBottom: 6 }}>
+                      面目标 {g.coords.length} 顶点 ｜ 外接框 {sizeInfo.wKm.toFixed(1)}km(东西) × {sizeInfo.hKm.toFixed(1)}km(南北)
+                      {sizeInfo.areaKm2 != null && <span style={{ color: 'var(--text-dim)' }}> ｜ 面积 {sizeInfo.areaKm2} km²</span>}
+                    </div>
+
+                    {/* 顶点坐标表 */}
+                    <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginBottom: 3 }}>顶点坐标（纬度, 经度）</div>
+                    <table style={{ fontSize: 11, ...mono, borderCollapse: 'collapse', marginBottom: 8 }}>
+                      <thead>
+                        <tr style={{ color: 'var(--text-dim)' }}>
+                          <th style={{ textAlign: 'left', padding: '1px 10px 1px 0', fontWeight: 400 }}>#</th>
+                          <th style={{ textAlign: 'right', padding: '1px 10px 1px 0', fontWeight: 400 }}>纬度(°N)</th>
+                          <th style={{ textAlign: 'right', padding: '1px 0', fontWeight: 400 }}>经度(°E)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.coords.map((c, i) => (
+                          <tr key={i}>
+                            <td style={{ padding: '1px 10px 1px 0', color: 'var(--text-dim)' }}>{i + 1}</td>
+                            <td style={{ padding: '1px 10px 1px 0', textAlign: 'right', color: 'var(--text-bright)' }}>{Number(c[0]).toFixed(5)}</td>
+                            <td style={{ padding: '1px 0', textAlign: 'right', color: 'var(--text-bright)' }}>{Number(c[1]).toFixed(5)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    {/* 包围盒 */}
+                    <div style={{ fontSize: 10.5, ...mono, color: 'var(--text-dim)', marginBottom: 8 }}>
+                      包围盒 纬度 {sizeInfo.minLat.toFixed(5)} ~ {sizeInfo.maxLat.toFixed(5)} ｜ 经度 {sizeInfo.minLon.toFixed(5)} ~ {sizeInfo.maxLon.toFixed(5)} ｜ 中心 {sizeInfo.cLat.toFixed(5)}, {sizeInfo.cLon.toFixed(5)}
+                    </div>
+
+                    {/* 条带划分 */}
+                    {ap.stripCount > 0 && (
+                      <div style={{ fontSize: 11, color: 'var(--text-bright)', marginBottom: 4 }}>
+                        条带划分：<strong>{ap.stripCount}</strong> 条
+                        {ap.swathKm != null && <span style={{ color: 'var(--text-dim)' }}> ｜ 幅宽 {ap.swathKm}km</span>}
+                        {ap.overlapPct != null && <span style={{ color: 'var(--text-dim)' }}> ｜ 重叠 {ap.overlapPct}%</span>}
+                        {ap.direction?.azimuthDeg != null && <span style={{ color: 'var(--text-dim)' }}> ｜ 方位 {ap.direction.azimuthDeg}°</span>}
+                        {ap.scale && <span style={{ color: 'var(--text-dim)' }}> ｜ {ap.scale}</span>}
+                      </div>
+                    )}
+                    {ap.direction?.note && (
+                      <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginBottom: 6 }}>{ap.direction.note}</div>
+                    )}
+
+                    {/* 各条带几何（从候选/覆盖计划取） */}
+                    {Array.isArray(ap.strips) && ap.strips.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginBottom: 3 }}>各条带覆盖范围</div>
+                        <table style={{ fontSize: 10.5, ...mono, borderCollapse: 'collapse', marginBottom: 8 }}>
+                          <thead>
+                            <tr style={{ color: 'var(--text-dim)' }}>
+                              <th style={{ textAlign: 'left', padding: '1px 8px 1px 0', fontWeight: 400 }}>带</th>
+                              <th style={{ textAlign: 'right', padding: '1px 8px 1px 0', fontWeight: 400 }}>起点 纬/经</th>
+                              <th style={{ textAlign: 'right', padding: '1px 8px 1px 0', fontWeight: 400 }}>终点 纬/经</th>
+                              <th style={{ textAlign: 'right', padding: '1px 8px 1px 0', fontWeight: 400 }}>宽×长</th>
+                              <th style={{ textAlign: 'right', padding: '1px 0', fontWeight: 400 }}>方位</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {ap.strips.slice(0, 40).map((st) => (
+                              <tr key={st.idx}>
+                                <td style={{ padding: '1px 8px 1px 0', color: 'var(--text-dim)' }}>{st.idx}</td>
+                                <td style={{ padding: '1px 8px 1px 0', textAlign: 'right', color: 'var(--text-bright)' }}>
+                                  {st.start ? `${st.start[0].toFixed(4)}, ${st.start[1].toFixed(4)}` : '—'}
+                                </td>
+                                <td style={{ padding: '1px 8px 1px 0', textAlign: 'right', color: 'var(--text-bright)' }}>
+                                  {st.end ? `${st.end[0].toFixed(4)}, ${st.end[1].toFixed(4)}` : '—'}
+                                </td>
+                                <td style={{ padding: '1px 8px 1px 0', textAlign: 'right' }}>
+                                  {st.widthKm != null ? `${st.widthKm}×${st.lengthKm}km` : '—'}
+                                </td>
+                                <td style={{ padding: '1px 0', textAlign: 'right' }}>{st.azimuthDeg != null ? `${st.azimuthDeg}°` : '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </>
+                    )}
+                  </>
+                )}
+
                 {topRank?.imgWinStart && (
-                  <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
                     首选过顶：{topRank.overpassTime?.slice(5, 19)} UTC ｜ 最近距离 {topRank.minDistKm?.toFixed(1)} km ｜ 覆盖窗 {topRank.imgWinStart?.slice(11, 19)}~{topRank.imgWinEnd?.slice(11, 19)}
                   </div>
                 )}
               </div>
             );
           })()}
-
 
           {/* 执行链路指引（状态驱动）：让 AI 下单与工作台操作无缝衔接 */}
 
