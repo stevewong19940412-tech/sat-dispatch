@@ -602,16 +602,35 @@ dispatchApi.delete("/tasks/:id", async (req, res) => {
   }
   if (!existed) return res.json({ ok: true, alreadyDeleted: true });
 
-  // 级联清理：candidates / rankings / orders / directPlans 四处关联记录先查后删
+  // 级联清理：candidates / rankings / orders / directPlans 四处关联记录
+  // 2026-11-16 性能修复：旧实现逐条 `await pbDelete()`，
+  //   一个任务 540 条候选 = 540 次串行 HTTP（每次 20~50ms）→ 删除要 10~30 秒，
+  //   用户反馈"点删除反应很慢"。改为 pbBatch 批量删（每批 200 条），
+  //   540 条 → 3 次请求，耗时从数十秒降到 1 秒级。
+  const cascadeStats = {};
   for (const table of ["candidates", "rankings", "orders", "directPlans"]) {
     try {
       const rel = await pbAll(table, { filter: `task='${ref.rid}'`, fields: "id" });
-      for (const rec of rel) {
-        try { await pbDelete(table, rec.id); }
-        catch (e) { if (e?.status !== 404) console.error(`[delete] ${table}/${rec.id}: ${e.message.slice(0, 80)}`); }
+      if (!rel.length) { cascadeStats[table] = 0; continue; }
+      let done = 0;
+      for (let i = 0; i < rel.length; i += 200) {
+        const chunk = rel.slice(i, i + 200);
+        const ops = chunk.map(r => ({ table, method: "DELETE", recordId: r.id }));
+        try {
+          await pbBatch(ops);
+          done += chunk.length;
+        } catch (e) {
+          // 整批失败时退化为逐条（保证不会因个别记录 404 导致整批失败）
+          for (const r of chunk) {
+            try { await pbDelete(table, r.id); done++; }
+            catch (e2) { if (e2?.status !== 404) console.error(`[delete] ${table}/${r.id}: ${e2.message.slice(0, 80)}`); }
+          }
+        }
       }
+      cascadeStats[table] = done;
     } catch (e) {
       console.error(`[delete] 级联清理 ${table} 失败: ${e.message.slice(0, 120)}`);
+      cascadeStats[table] = -1;
     }
   }
   try {
@@ -622,7 +641,7 @@ dispatchApi.delete("/tasks/:id", async (req, res) => {
       return res.status(500).json({ error: '删除任务失败', detail: String(e.message).slice(0, 200) });
     }
   }
-  res.json({ ok: true });
+  res.json({ ok: true, cascade: cascadeStats });
 });
 
 // ─── 候选卫星计算（4.3）──────────────────────────────────────────────────

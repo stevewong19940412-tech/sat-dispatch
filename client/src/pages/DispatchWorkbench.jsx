@@ -20,6 +20,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   // 删除确认弹窗状态（主组件持有，TasksTab 通过 onRequestDelete 回调触发）
+  const [deleting, setDeleting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   // 直控参数包核验弹窗（主组件持有；人工勾选核验项后确认上注）
   const [uplinkVerify, setUplinkVerify] = useState(null);
@@ -418,11 +419,13 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
                 <button className="btn secondary" onClick={() => setDeleteConfirm(null)}>取消</button>
-                <button className="btn danger" onClick={async () => {
+                <button className="btn danger" disabled={deleting} onClick={async () => {
                   const id = deleteConfirm.id;
+                  setDeleting(true);
                   setDeleteConfirm(null);
-                  await deleteTask(id);
-                }}>确认删除</button>
+                  setMsg({ ok: true, text: '正在删除…（级联清理候选与排序，请稍候）' });
+                  try { await deleteTask(id); } finally { setDeleting(false); }
+                }}>{deleting ? '删除中…' : '确认删除'}</button>
               </div>
             </div>
           </div>
