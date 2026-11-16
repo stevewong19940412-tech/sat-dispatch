@@ -187,21 +187,28 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     });
   }
 
-  // ── 步骤2.5：整体可行性复核（2026-11-16 新增）────────────────────────
-  // 逐条冲突检查只能保证"两两"不冲突，仍可能出现"很多条带累计成像时长
-  // 超过一次过顶可用时长"的方案（实测曾有 33 条带 1972km 挤在 21 秒内）。
-  // 这里按星复核：同一过顶簇内，Σ成像时长 + Σ机动 ≤ 簇跨度，否则裁掉超出的条带。
+  // ── 步骤2.5：单次过顶的成像时长约束（2026-11-16 重写）────────────────
+  // 逐条 conflicts() 只能保证"两两"不冲突，仍可能排出一簇条带累计成像时长
+  // 超过该次过顶可用时长的方案（实测曾有 33 条带 1972km 挤进 21 秒）。
+  //
+  // 上一版的三处缺陷（已被验收指出，此处全部修正）：
+  //   ① removed 定义在簇循环外 → 跨簇累积，处理后一簇时会重复 splice 前一簇的记录；
+  //   ② availSec = 跨度+60s，没有使用真实成像窗（imgWin）；
+  //   ③ 没有对簇内累计时长做联合约束（只看两两）。
+  //
+  // 正确口径：一次过顶的可用成像时长 = 该簇内所有条带成像窗的**并集长度**
+  // （同一过顶的 imgWin 基本重合），簇内所有条带的成像时长之和不得超过它。
   {
     const bySat = new Map();
     for (const a of assignments) {
       if (!bySat.has(a.satName)) bySat.set(a.satName, []);
       bySat.get(a.satName).push(a);
     }
-    const removed = [];
-    for (const [satName, list] of bySat) {
+    const removedAll = [];
+    for (const [, list] of bySat) {
       if (list.length < 2) continue;
       list.sort((x, y) => new Date(x.overpass) - new Date(y.overpass));
-      // 按过顶时刻聚簇：间隔 < 10 分钟的算同一次过顶
+      // 聚簇：相邻过顶间隔 < 10 分钟视为同一次过顶
       const clusters = [];
       let cur = [list[0]];
       for (let i = 1; i < list.length; i++) {
@@ -210,29 +217,54 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
         else { clusters.push(cur); cur = [list[i]]; }
       }
       clusters.push(cur);
+
       for (const cl of clusters) {
         if (cl.length < 2) continue;
-        const spanSec = (new Date(cl[cl.length - 1].overpass) - new Date(cl[0].overpass)) / 1000;
-        // 该簇可用时长 = 跨度 + 单条带典型可拍时长（过顶窗口本身有长度）
-        const availSec = Math.max(spanSec, 0) + 60;
-        let used = 0;
-        const kept = [];
-        for (let i = 0; i < cl.length; i++) {
-          const need = (cl[i].stripLengthKm ?? 60) / 6.83 + (i > 0 ? 12 : 0);
-          if (used + need > availSec) { removed.push(cl[i]); continue; }
-          used += need; kept.push(cl[i]);
+        // ① 每个簇独立计算可用时长（局部变量，不跨簇污染）
+        // 可用时长 = 簇内成像窗并集长度；若窗口缺失，退化为"过顶跨度 + 单景 60s"
+        let winStart = Infinity, winEnd = -Infinity, hasWin = false;
+        for (const a of cl) {
+          const ws = a.imgWinStart ? new Date(a.imgWinStart).getTime() : null;
+          const we = a.imgWinEnd ? new Date(a.imgWinEnd).getTime() : null;
+          if (ws && we && we > ws) { hasWin = true; winStart = Math.min(winStart, ws); winEnd = Math.max(winEnd, we); }
         }
-        if (kept.length !== cl.length) {
-          for (const r of removed) {
-            const idx = assignments.indexOf(r);
-            if (idx >= 0) assignments.splice(idx, 1);
+        let availSec;
+        if (hasWin) {
+          availSec = (winEnd - winStart) / 1000;
+        } else {
+          const span = (new Date(cl[cl.length - 1].overpass) - new Date(cl[0].overpass)) / 1000;
+          availSec = span + 60;
+        }
+        availSec = Math.max(availSec, 30);   // 单次过顶至少按 30s 计（保守下限）
+
+        // ② 簇内联合约束：Σ成像时长 + Σ机动 ≤ 可用时长
+        let used = 0;
+        const keptInCluster = [];
+        const removedInCluster = [];      // 本簇自己的移除列表，不跨簇
+        for (let i = 0; i < cl.length; i++) {
+          const imgSec = (cl[i].stripLengthKm ?? 60) / 6.83;
+          const maneuverSec = i > 0 ? 12 : 0;
+          if (used + imgSec + maneuverSec > availSec) {
+            removedInCluster.push(cl[i]);
+            continue;
           }
+          used += imgSec + maneuverSec;
+          keptInCluster.push(cl[i]);
+        }
+        // ③ 只 splice 本簇内被移除的记录
+        for (const r of removedInCluster) {
+          const idx = assignments.indexOf(r);
+          if (idx >= 0) assignments.splice(idx, 1);
+          removedAll.push({ ...r, availSec: +availSec.toFixed(1), needSec: +((r.stripLengthKm ?? 60) / 6.83).toFixed(1) });
         }
       }
     }
-    // 被裁掉的条带补回 gaps（给真实原因）
-    for (const r of removed) {
-      gaps.push({ stripId: r.stripIdx, reason: `单次过顶内成像时长不足（该星该过顶已排满）` });
+    // 被裁掉的条带补回 gaps（给出真实数值依据）
+    for (const r of removedAll) {
+      gaps.push({
+        stripId: r.stripIdx,
+        reason: `该星本次过顶可用成像 ${r.availSec}s，本带需 ${r.needSec}s，已排满`,
+      });
     }
   }
 

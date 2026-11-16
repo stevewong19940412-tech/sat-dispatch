@@ -707,10 +707,12 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       for (const r of passingRows) {
         const si = r.stripIdx ?? 1;
         if (!candByStrip.has(si)) candByStrip.set(si, []);
+        const stDef = strips.find(x => x.idx === si);
         candByStrip.get(si).push({
           satName: r.satName, satNoradId: r.satNoradId, company: r.company,
           overpass: r.overpassTime, slewDeg: r.slewDeg,
           stripCoverage: r.stripCoverage, imgWinStart: r.imgWinStart, imgWinEnd: r.imgWinEnd,
+          lengthKm: stDef?.lengthKm ?? 60,   // 分派器算成像时长需要
         });
       }
       // 点目标没有 start/end（只有中心点坐标），这里补成同点，避免下游解构 undefined 抛错
