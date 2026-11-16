@@ -208,13 +208,35 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     for (const [, list] of bySat) {
       if (list.length < 2) continue;
       list.sort((x, y) => new Date(x.overpass) - new Date(y.overpass));
-      // 聚簇：相邻过顶间隔 < 10 分钟视为同一次过顶
+      // 聚簇（2026-11-16 修正）：判据必须是「成像窗是否重叠」，不是 overpass 间隔。
+      // 同一次过顶的多条带 overpass 可能相差几百秒（不同侧摆的最近点不同），
+      // 用 overpass 间隔聚簇会把一次过顶拆成多个"小簇"，每簇都各自不超载，
+      // 合起来却远超该次过顶的可用时长——这正是超载簇漏裁的根因。
       const clusters = [];
       let cur = [list[0]];
+      const winOf = (a) => [
+        a.imgWinStart ? new Date(a.imgWinStart).getTime() : null,
+        a.imgWinEnd ? new Date(a.imgWinEnd).getTime() : null,
+      ];
+      let [curWs, curWe] = winOf(list[0]);
       for (let i = 1; i < list.length; i++) {
-        const gap = new Date(list[i].overpass) - new Date(list[i - 1].overpass);
-        if (gap < 600000) cur.push(list[i]);
-        else { clusters.push(cur); cur = [list[i]]; }
+        const [ws, we] = winOf(list[i]);
+        // 与当前簇的时间范围有交叠（或任一缺窗口时按 overpass 近邻）→ 归入同簇
+        let sameCluster;
+        if (curWs != null && ws != null && curWe != null && we != null) {
+          sameCluster = ws <= curWe && we >= curWs;
+        } else {
+          sameCluster = new Date(list[i].overpass) - new Date(list[i - 1].overpass) < 600000;
+        }
+        if (sameCluster) {
+          cur.push(list[i]);
+          if (ws != null) curWs = curWs == null ? ws : Math.min(curWs, ws);
+          if (we != null) curWe = curWe == null ? we : Math.max(curWe, we);
+        } else {
+          clusters.push(cur);
+          cur = [list[i]];
+          [curWs, curWe] = winOf(list[i]);
+        }
       }
       clusters.push(cur);
 
