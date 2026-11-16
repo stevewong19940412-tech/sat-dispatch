@@ -669,10 +669,19 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       }
     }
     // 只有「通过约束且幅宽/侧摆可覆盖」才算真正覆盖该条带
-    // 只有「幅宽可覆盖 且 条带完整度 ≥0.99」才算该条带真正被覆盖，
-    // 避免窄时窗下"只扫到条带中段"被当成全覆盖。
-    const assigned = [...byStrip.values()].filter(a => a.imgWin && (a.stripCoverage ?? 1) >= 0.99);
+    // 覆盖统计口径（2026-11-16 改为网格点法实测覆盖率）：
+    //   full(≥99%)  → 计入「已覆盖」
+    //   high(85~99%) → 计入「已覆盖」，但记 warning（可拼接、需补缝）
+    //   partial/fragment → 计入「部分覆盖」，明确列出实际覆盖率与缺口公里数
+    //   旧口径只认 ≥0.99，会把 81% 的条带直接判死；现在按等级区分，信息更完整。
+    const all = [...byStrip.values()].filter(a => a.imgWin);
+    const assigned = all.filter(a => (a.stripCoverage ?? 1) >= 0.85);
+    const partialStrips = all.filter(a => (a.stripCoverage ?? 1) >= 0.5 && (a.stripCoverage ?? 1) < 0.85)
+      .map(a => ({ idx: a.idx, coveragePct: +((a.stripCoverage ?? 0) * 100).toFixed(1),
+                    gapKm: a.stripCoverageDetail?.maxGapKm ?? null }));
     coveragePlan = summarizeCoveragePlan(areaPlan, assigned);
+    coveragePlan.partialStrips = partialStrips;
+    coveragePlan.coverageMethod = 'grid-point (网格粒度=幅宽/8)';
     if (coveragePlan.coveragePct < 100) {
       coverageWarning = {
         level: coveragePlan.coveragePct === 0 ? 'NONE_COVERED' : 'PARTIAL',
