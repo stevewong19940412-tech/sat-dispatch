@@ -7,3 +7,7 @@ client/dist
 data/gp_raw.json
 data/*.log
 __pycache__/
+
+# 部署产物：每次 blade app deploy 自动重新生成（~80MB），
+# 提交进 git 会让 .git 膨胀到数 GB，导致部署打包超时（本次 4.1G / >600s）
+deploy/*.zip
