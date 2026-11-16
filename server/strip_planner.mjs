@@ -24,12 +24,17 @@ export const SCALES = [
 ];
 
 /** 各尺度的默认策略参数（可在任务上覆盖） */
+// maxStripLenKm：单条带沿轨方向的最大长度（超过则切成多段）。
+// 依据：低轨卫星单次过顶的可用成像弧段通常 60~180 秒，地面速度 6.83 km/s，
+// 对应可连续扫过约 400~1200 km；但受姿态指向与轨迹夹角影响，实际有效扫过
+// 通常只有几百 km 量级。取 100 km 作为「单段可靠可扫长度」，
+// 使每条带都能被一次过顶完整覆盖——这是避免"条带名义覆盖、实际只扫中段"的关键。
 export const SCALE_POLICY = {
-  facility: { overlapRate: 0.15, allowMultiPass: false, gridKm: null,   preferSinglePass: true,  note: '单条带/单景，一次过顶完成' },
-  small:    { overlapRate: 0.15, allowMultiPass: false, gridKm: null,   preferSinglePass: true,  note: '单/双条带，优先同轨拼幅' },
-  medium:   { overlapRate: 0.15, allowMultiPass: true,  gridKm: null,   preferSinglePass: true,  note: '条带族，优先同轨多带侧摆拼接' },
-  large:    { overlapRate: 0.15, allowMultiPass: true,  gridKm: null,   preferSinglePass: false, note: '条带族 + 多星分派，长窗口' },
-  national: { overlapRate: 0.20, allowMultiPass: true,  gridKm: 16,     preferSinglePass: false, note: '格网化 + 多星多期，强调覆盖与拼图冗余' },
+  facility: { overlapRate: 0.15, allowMultiPass: false, gridKm: null, maxStripLenKm: 100, preferSinglePass: true,  note: '单条带/单景，一次过顶完成' },
+  small:    { overlapRate: 0.15, allowMultiPass: false, gridKm: null, maxStripLenKm: 100, preferSinglePass: true,  note: '单/双条带，优先同轨拼幅' },
+  medium:   { overlapRate: 0.15, allowMultiPass: true,  gridKm: null, maxStripLenKm: 100, preferSinglePass: true,  note: '条带族，优先同轨多带侧摆拼接' },
+  large:    { overlapRate: 0.15, allowMultiPass: true,  gridKm: null, maxStripLenKm: 100, preferSinglePass: false, note: '条带族 + 多星分派，长窗口' },
+  national: { overlapRate: 0.20, allowMultiPass: true,  gridKm: 16,   maxStripLenKm: 100, preferSinglePass: false, note: '格网化 + 多星多期，强调覆盖与拼图冗余' },
 };
 
 /**
@@ -156,8 +161,13 @@ export function planAreaStrips(coords, opt = {}) {
 
   const strips = [];
   let idx = 0;
+  const maxLen = policy.maxStripLenKm ?? 100;
+  // 沿轨方向按 maxLen 分段：每条带长度不超过单次过顶可靠可扫长度，
+  // 否则会出现"名义上是一条带、实际只能扫到中段"的假覆盖。
+  const segCount = Math.max(1, Math.ceil((vMax - vMin) / maxLen));
+  const segLen = (vMax - vMin) / segCount;
+
   for (let u = uMin; u < uMax - 1e-6; u += step) {
-    idx++;
     // 首末条带按需裁剪：若剩余宽度不足整幅宽，只取到边界为止（避免小区域冗余过高）。
     // 但不得窄于幅宽的 30%，否则拼接价值过低，宁可按整幅宽覆盖。
     let uL = u;
@@ -165,8 +175,12 @@ export function planAreaStrips(coords, opt = {}) {
     if (uR - uL < swathKm * 0.3) uR = Math.min(uL + swathKm, uMax);
     const actualWidth = uR - uL;
     // 求该条带在旋转系内的覆盖范围（用旋转系多边形做采样）
-    const band = clipStripY(rot, uL, uR, vMin, vMax);
-    if (!band) continue;
+    for (let seg = 0; seg < segCount; seg++) {
+    idx++;
+    const segLo = vMin + seg * segLen;
+    const segHi = vMin + (seg + 1) * segLen;
+    const band = clipStripY(rot, uL, uR, segLo, segHi);
+    if (!band) { idx--; continue; }
     const uC = (uL + uR) / 2;
     const vC = (band.yLo + band.yHi) / 2;
     const [xC, yC] = rotInv([uC, vC]);
@@ -193,7 +207,10 @@ export function planAreaStrips(coords, opt = {}) {
       end: [+lat2.toFixed(5), +lon2.toFixed(5)],
       overlapPct: idx === 1 ? 0 : +(policy.overlapRate * 100).toFixed(1),
       coverageRatio: +band.coverage.toFixed(3),
+      segmentIdx: seg + 1,
+      segmentCount: segCount,
     });
+    }
   }
   for (const s of strips) s.count = strips.length;
 
