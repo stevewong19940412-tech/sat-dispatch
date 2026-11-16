@@ -667,7 +667,8 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   // 也被当作成功。这里按条带统计：有可用候选=已排程，无=缺口，并明确给出覆盖率。
   let coveragePlan = null;
   let coverageWarning = null;
-  if (areaPlan && strips.length > 1) {
+  // 点目标没有 areaPlan，但也要走多星分派（否则点目标永远只能用第一颗星）
+  if (strips.length > 0) {
     const byStrip = new Map();
     for (const r of passingRows) {
       const si = r.stripIdx ?? 0;
@@ -688,7 +689,12 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     const partialStrips = all.filter(a => (a.stripCoverage ?? 1) >= 0.5 && (a.stripCoverage ?? 1) < 0.85)
       .map(a => ({ idx: a.idx, coveragePct: +((a.stripCoverage ?? 0) * 100).toFixed(1),
                     gapKm: a.stripCoverageDetail?.maxGapKm ?? null }));
-    coveragePlan = summarizeCoveragePlan(areaPlan, assigned);
+    // 点目标（areaPlan=null）用合成的 plan 对象走同一套汇总逻辑
+    const planForSummary = areaPlan ?? {
+      scaleLabel: '点目标', policy: { note: '单点成像，单条带' },
+      strips: strips.map(st => ({ idx: st.idx })), direction: null,
+    };
+    coveragePlan = summarizeCoveragePlan(planForSummary, assigned);
     coveragePlan.partialStrips = partialStrips;
     coveragePlan.coverageMethod = 'grid-point (网格粒度=幅宽/8)';
 
@@ -752,7 +758,7 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           ? `本任务 ${coveragePlan.totalStrips} 条带中无一条带存在可用过顶，无法完成区域覆盖`
           : `本任务 ${coveragePlan.totalStrips} 条带中仅 ${coveragePlan.scheduled} 条有可用过顶（覆盖率 ${coveragePlan.coveragePct}%），` +
             `剩余 ${coveragePlan.unscheduled} 条带覆盖缺口，请扩大时窗/增加星座/降低分辨率后重算`,
-        gaps: coveragePlan.gaps.slice(0, 20),
+        gaps: (coveragePlan.gaps ?? []).slice(0, 20),
         suggestion: coveragePlan.coveragePct < 30
           ? '建议改用多星多期方案（拉长时窗至 30~60 天，或加入宽幅星座），单星单窗无法完成'
           : '建议扩大时窗或允许更多卫星参与，补齐剩余条带',
@@ -917,8 +923,19 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
     .reduce((mx, c) => Math.max(mx, c.stripIdx ?? 1), 1);
-  // 条带定义要带长度：冲突判定按「条带长 ÷ 地面速度」估算实际成像时长
-  const stripLenByIdx = new Map(strips.map(st => [st.idx, st.lengthKm ?? 60]));
+  // 条带定义要带长度：冲突判定按「条带长 ÷ 地面速度」估算实际成像时长。
+  // 注意：本路由作用域内没有 strips 变量（strips 只在 candidates 路由里），
+  // 这里必须从任务 geom 重新规划一次，否则会抛 ReferenceError（v115 的派单 503 根因）。
+  const stripLenByIdx = new Map();
+  try {
+    const geomObj = JSON.parse(task.geom ?? "{}");
+    if (task.geomType !== 'point' && Array.isArray(geomObj.coords)) {
+      const planned = normalizeTaskStrips(task, 12);
+      for (const st of planned) stripLenByIdx.set(st.idx, st.lengthKm ?? 60);
+    }
+  } catch (e) {
+    console.error('[dispatch] 条带长度重算失败，回退默认 60km:', e.message);
+  }
   const allStripDefs = [];
   for (let i = 1; i <= totalStrips; i++) allStripDefs.push({ idx: i, lengthKm: stripLenByIdx.get(i) ?? 60 });
 
