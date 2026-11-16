@@ -200,6 +200,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
   //
   // 正确口径：一次过顶的可用成像时长 = 该簇内所有条带成像窗的**并集长度**
   // （同一过顶的 imgWin 基本重合），簇内所有条带的成像时长之和不得超过它。
+  let removedAllCount = 0;
   {
     const bySat = new Map();
     for (const a of assignments) {
@@ -279,6 +280,20 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
         }
       }
     }
+    // 诊断输出：把每个簇的核算过程暴露出来（便于验收自证约束是否生效）
+    if (opt.debugCluster) {
+      dispatchAcrossSatellites._lastClusters = [];
+      for (const [, list] of bySat) {
+        if (!list.length) continue;
+        const arr = [...list].sort((x, y) => (x.imgWinStart ? new Date(x.imgWinStart) : new Date(x.overpass)) - (y.imgWinStart ? new Date(y.imgWinStart) : new Date(y.overpass)));
+        dispatchAcrossSatellites._lastClusters.push({
+          satName: arr[0].satName, strips: arr.length,
+          totalLengthKm: +arr.reduce((a, x) => a + (x.stripLengthKm ?? 60), 0).toFixed(1),
+          needSec: +(arr.reduce((a, x) => a + (x.stripLengthKm ?? 60) / 6.83, 0) + 12 * Math.max(0, arr.length - 1)).toFixed(1),
+        });
+      }
+    }
+    removedAllCount = removedAll.length;
     // 被裁掉的条带补回 gaps（给出真实数值依据）
     for (const r of removedAll) {
       gaps.push({
@@ -287,6 +302,15 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       });
     }
   }
+
+  // 约束执行摘要（写入返回体，验收可直接核对，不必翻代码）
+  const constraintAudit = {
+    enabled: true,
+    buildTag: BUILD_TAG,
+    totalStrips: strips.length,
+    assignedAfterConstraint: assignments.length,
+    removedByImagingTime: removedAllCount,
+  };
 
   // ── 步骤3：汇总 ──
   const total = strips.length;
@@ -320,6 +344,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       areaCoveredKm2: +assignments.reduce((s, a) => s + a.stripWidthKm * a.stripLengthKm * a.coverage, 0).toFixed(1),
     },
     gaps,
+    constraintAudit,
     stats: {
       satelliteCount: sats.length,
       spanDays: +spanDays.toFixed(1),

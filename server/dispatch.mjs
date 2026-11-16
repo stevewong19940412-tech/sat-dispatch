@@ -760,6 +760,7 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
         // 而 coveragePlan.coveragePct 是「有可用候选的条带占比」。
         // 前者才是真实可交付的覆盖率，统一以后者为准（见下方 authoritativeCoverage）。
         authoritative: true,
+        constraintAudit: multi.constraintAudit ?? null,
         assignments: multi.assignments.map(a => ({
           stripIdx: a.stripIdx, satName: a.satName, company: a.company,
           overpass: a.overpass, slewDeg: a.slewDeg,
