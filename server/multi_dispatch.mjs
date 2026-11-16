@@ -131,8 +131,20 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       gaps.push({ stripId: strip.idx, reason: allowPartial ? '无任何可用过顶' : `无覆盖率≥${(minCoverage*100).toFixed(0)}%的候选` });
       continue;
     }
+    // 候选尝试顺序（2026-11-16 修正）：先试「能与该星已有任务排进同一过顶」的候选，
+    // 再试其他候选。否则会出现：贪心选了颗已被占满的星 → 判冲突 → 该条带被判缺口，
+    // 而实际另一颗星/另一个过顶完全能拍（实测 3 条带只分 2 条、却判"无需拆单"的矛盾）。
+    const ordered = [...candidates].sort((x, y) => {
+      const tx = satTimeline.get(x.satName) ?? [];
+      const ty = satTimeline.get(y.satName) ?? [];
+      const fx = tx.some(t => conflicts(t, x, opt)) ? 1 : 0;
+      const fy = ty.some(t => conflicts(t, y, opt)) ? 1 : 0;
+      if (fx !== fy) return fx - fy;                       // 可排入的优先
+      if (Math.abs(y.stripCoverage - x.stripCoverage) > 0.02) return y.stripCoverage - x.stripCoverage;
+      return new Date(x.overpass) - new Date(y.overpass);   // 时间早的优先
+    });
     let picked = null;
-    for (const c of candidates) {
+    for (const c of ordered) {
       const load = satLoad.get(c.satName) ?? 0;
       if (load >= satCapacity) continue;                       // 该星已达承载上限
       const tl = satTimeline.get(c.satName) ?? [];
@@ -146,7 +158,15 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     }
     satLoad.set(picked.satName, (satLoad.get(picked.satName) ?? 0) + 1);
     const tl = satTimeline.get(picked.satName) ?? [];
-    tl.push({ overpass: picked.overpass });
+    // 必须存完整任务信息（成像窗/侧摆/条带长），否则后续冲突判定拿不到字段，
+    // 会把所有候选都当成"无时间信息"而误判（曾经的缺陷：只 push 了 overpass）。
+    tl.push({
+      overpass: picked.overpass,
+      imgStart: picked.imgWinStart ?? picked.overpass,
+      imgEnd: picked.imgWinEnd ?? picked.overpass,
+      slewDeg: picked.slewDeg ?? 0,
+      lengthKm: picked.lengthKm ?? strip.lengthKm ?? 60,
+    });
     satTimeline.set(picked.satName, tl);
     assignments.push({
       stripIdx: strip.idx,
