@@ -1307,13 +1307,13 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     const slew = rk.slewDeg ?? 0;
     const cap0 = getCapability({ name: rk.satName ?? '' });
     const effGsd = cap0?.resolution ? +(cap0.resolution * (1 + slew / Math.max(1, cap0.slewLimitDeg) * 0.5)).toFixed(2) : null;
-    const stDef = strips.find(x => x.idx === si) ?? {};
+    const stDef = allStripDefs.find(x => x.idx === si) ?? {};
     const imgSec = stDef.lengthKm ? +((stDef.lengthKm) / 6.83).toFixed(1) : null;
     const execPlan = [
       `过顶时刻 ${ovBJT ?? '-'}（北京时间）`,
       `成像窗 ${rk.imgWinStart ? new Date(new Date(rk.imgWinStart).getTime() + 8 * 3600e3).toISOString().slice(11, 19) : '-'}~${rk.imgWinEnd ? new Date(new Date(rk.imgWinEnd).getTime() + 8 * 3600e3).toISOString().slice(11, 19) : '-'}`,
       `侧摆 ${slew.toFixed(1)}°`,
-      `条带 ${si}/${strips.length}（${stDef.widthKm ?? 12}km × ${(stDef.lengthKm ?? 0).toFixed(1)}km）`,
+      `条带 ${si}/${allStripDefs.length}（${stDef.widthKm ?? 12}km × ${(stDef.lengthKm ?? 0).toFixed(1)}km）`,
       `成像约 ${imgSec ?? '-'} 秒`,
       `有效分辨率 ${effGsd ?? '-'}m`,
       `条带覆盖率 ${rk.stripCoverage != null ? (rk.stripCoverage * 100).toFixed(1) + '%' : '-'}`,
@@ -1333,7 +1333,7 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
       imgWindowStart: rk.imgWinStart ?? null, imgWindowEnd: rk.imgWinEnd ?? null,
       slewDeg: slew, imagingSec: imgSec,
       swathKm: stDef.widthKm ?? 12, effGsdM: effGsd,
-      stripIdx: si, stripCount: strips.length,
+      stripIdx: si, stripCount: allStripDefs.length,
       coverPct: rk.stripCoverage != null ? +(rk.stripCoverage * 100).toFixed(1) : null,
       cloudFc: rk.cloudFc ?? null,
       execPlan,

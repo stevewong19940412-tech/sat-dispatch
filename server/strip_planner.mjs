@@ -287,12 +287,71 @@ export function planAreaStrips(coords, opt = {}) {
   const segCount = Math.max(1, Math.ceil((vMax - vMin) / maxLen));
   const segLen = (vMax - vMin) / segCount;
 
-  for (let u = uMin; u < uMax - 1e-6; u += step) {
-    // 首末条带按需裁剪：若剩余宽度不足整幅宽，只取到边界为止（避免小区域冗余过高）。
-    // 但不得窄于幅宽的 30%，否则拼接价值过低，宁可按整幅宽覆盖。
-    let uL = u;
-    let uR = Math.min(u + swathKm, uMax);
-    if (uR - uL < swathKm * 0.3) uR = Math.min(uL + swathKm, uMax);
+  // ── 条带位置布局（文献：OVSC 条带位置/长度可变，非固定等间距）──────────────
+  // 问题：从西边界起等间距铺（步进 = 幅宽×(1-重叠)），末带常被切成残带。
+  //   实测海淀一块 17.7km 宽、幅宽 20km → 带1 18.82km + 带2 仅 1.82km。
+  //   残带虽能盖住缺口，但宽度远小于幅宽，拼接质量差、成像资源利用率低。
+  // 文献做法（Eur. J. Oper. Res. 2021「Orientational variable-length strip covering」）：
+  //   条带的位置与长度是待优化变量，目标是覆盖完整 + 总长最短。
+  // 文献约束（许越等 2017「多条带拼接重叠像元数阈值」）：
+  //   相邻条带必须保证足够重叠宽度（0.46m 分辨率下 ≥28 像素，敏捷条带阈值更高）。
+  //
+  // 本实现：先按等间距算条带数 N，再判断末带是否过窄（< 幅宽×40%）。
+  //   过窄 → 把整个跨度按 N 条「均匀重分布」，使每条宽度相近且都有充分重叠；
+  //   否则保持等间距（满带 + 正常末带）。
+  const spanU = uMax - uMin;
+  // 条带数：spanU ≤ 幅宽 → 1 条即可整幅覆盖（此时不按 step 铺，否则 17.7km 会被
+  // 步进 17km 切成"18.82 + 1.82"两段，正是用户看到的怪现象）。
+  // spanU > 幅宽 → 按 step 铺，末带按残宽判断是否重分布。
+  let stripCountU;
+  if (spanU <= swathKm) {
+    stripCountU = 1;
+  } else {
+    stripCountU = Math.ceil((spanU - swathKm) / step) + 1;
+  }
+  const lastStripWidthIfEven = stripCountU > 1 ? spanU - (stripCountU - 1) * step : spanU;
+  const needRedistribute = stripCountU > 1 && lastStripWidthIfEven < swathKm * 0.4;
+  // 均匀布局时每带宽度：各带宽度均不超过幅宽
+  const evenWidth = stripCountU > 1
+    ? Math.min(swathKm, spanU / stripCountU + swathKm * policy.overlapRate)
+    : spanU;
+
+  // 计算每条带的 [uL, uR]
+  const uBands = [];
+  if (needRedistribute) {
+    // 均匀重分布：把 spanU 均分为 stripCountU 段，每段中心对称展开一幅宽
+    const segW = spanU / stripCountU;
+    for (let i = 0; i < stripCountU; i++) {
+      const center = uMin + segW * (i + 0.5);
+      let uL = center - evenWidth / 2;
+      let uR = center + evenWidth / 2;
+      // 首末条带贴边不越界
+      if (uL < uMin) { uR += (uMin - uL); uL = uMin; }
+      if (uR > uMax) { uL -= (uR - uMax); uR = uMax; }
+      uL = Math.max(uL, uMin); uR = Math.min(uR, uMax);
+      uBands.push([uL, uR]);
+    }
+  } else if (stripCountU === 1) {
+    // 单条带：整幅宽覆盖整个跨度（居中，不越界）
+    const center = (uMin + uMax) / 2;
+    let uL = center - swathKm / 2;
+    let uR = center + swathKm / 2;
+    if (uL < uMin) { uR += (uMin - uL); uL = uMin; }
+    if (uR > uMax) { uL -= (uR - uMax); uR = uMax; }
+    uL = Math.max(uL, uMin); uR = Math.min(uR, uMax);
+    uBands.push([uL, uR]);
+  } else {
+    for (let u = uMin; u < uMax - 1e-6; u += step) {
+      let uL = u;
+      let uR = Math.min(u + swathKm, uMax);
+      if (uR - uL < swathKm * 0.3) uR = Math.min(uL + swathKm, uMax);
+      uBands.push([uL, uR]);
+    }
+  }
+
+  for (const [bU, beU] of uBands) {
+    let uL = bU;
+    let uR = beU;
     const actualWidth = uR - uL;
     // 求该条带在旋转系内的覆盖范围（用旋转系多边形做采样）
     for (let seg = 0; seg < segCount; seg++) {
