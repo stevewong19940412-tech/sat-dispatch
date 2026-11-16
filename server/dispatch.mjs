@@ -152,16 +152,63 @@ dispatchApi.post("/order-intake", async (req, res) => {
     return res.json({ reused: true, taskId: existing.id, taskNo: existing.taskNo, status: existing.status, candidates: ranked.length ?? null });
   }
 
-  // ── 面目标按条带拆成多个独立任务（2026-11-16 用户口径）────────────────────
-  // 用户明确要求：「一个区域需求 → 每个条带就是一个独立任务」，而不是
-  // 「1 个任务派 5 张订单」。这样每条带都能独立派单、独立直控、独立跟踪履约。
-  // 点目标不拆；面目标先规划条带，>1 条时逐条建任务并返回任务列表。
+  // ── 先判定「要不要拆」，再决定拆不拆（2026-11-16 修正）────────────────────
+  // 用户口径：「先判断任务要不要涉及多星规划，如果涉及就要拆单」。
+  // 旧实现无条件按 12km 幅宽切条带 → 「石景山区」这种小区块也被切成 2 带、
+  // 派出 2 张单（PO-188/189 还是同一颗星拍两次），用户看不懂。
+  //
+  // 判定顺序（与 skill「覆盖范围判定」一致）：
+  //   ① 量区域尺寸 → ② 查满足分辨率的可用卫星最宽幅宽
+  //   ③ 长边 ≤ 最宽幅宽 → 单星单次可完成，不拆
+  //   ④ 长边 > 2×幅宽 → 确定要拆
+  //   ⑤ 介于两者之间 → 保守按拆处理（侧摆跨带需实测）
   let stripPlan = null;
+  let scopeJudge = null;
   if (b.geomType !== "point" && Array.isArray(g.coords) && g.coords.length >= 3 && b.splitStrips !== false) {
     try {
-      const planned = normalizeTaskStrips({ geomType: 'polygon', geom: JSON.stringify({ coords: g.coords }) }, 12);
-      if (planned.length > 1) stripPlan = planned;
-    } catch (e) { console.error('[order-intake] 条带规划失败，按单任务处理:', e.message); }
+      // ① 区域尺寸（km）
+      const lats = g.coords.map(c => c[0]), lons = g.coords.map(c => c[1]);
+      const cLat0 = (Math.max(...lats) + Math.min(...lats)) / 2;
+      const spanKmLat = Math.abs(Math.max(...lats) - Math.min(...lats)) * 110.57;
+      const spanKmLon = Math.abs(Math.max(...lons) - Math.min(...lons)) * 111.32 * Math.cos(cLat0 * Math.PI / 180);
+      const maxEdgeKm = Math.max(spanKmLat, spanKmLon);
+
+      // ② 满足分辨率要求的可用卫星里，最宽幅宽
+      const wantSar0 = b.obsType === 'sar';
+      const tRes = Number(b.resolution) || 2;
+      const satRows0 = await pbAll("satellites", { filter: "decayed=0" });
+      const usable = satRows0.filter(s => {
+        const sub = String(s.subCategory ?? '').toLowerCase();
+        const typeOk = wantSar0 ? sub === 'sar' : ['optical', 'staring', 'hyperspectral'].includes(sub);
+        if (!typeOk || s.country !== '中国') return false;
+        const res = getCapability(s)?.resolution;
+        return res == null || res <= tRes * 1.2;
+      });
+      const caps0 = usable.map(x => getCapability(x)).filter(c => c?.swathKm);
+      const maxSwathKm = caps0.length ? Math.max(...caps0.map(c => c.swathKm)) : 12;
+
+      // ③④⑤ 判定
+      let needSplit, reason;
+      if (maxEdgeKm <= maxSwathKm) {
+        needSplit = false;
+        reason = `区域长边 ${maxEdgeKm.toFixed(1)}km ≤ 最宽可用幅宽 ${maxSwathKm}km，单星单次可完成`;
+      } else if (maxEdgeKm > 2 * maxSwathKm) {
+        needSplit = true;
+        reason = `区域长边 ${maxEdgeKm.toFixed(1)}km > 2×幅宽 ${(2*maxSwathKm).toFixed(0)}km，必须拆`;
+      } else {
+        needSplit = true;
+        reason = `区域长边 ${maxEdgeKm.toFixed(1)}km 介于 1~2 倍幅宽 ${maxSwathKm}km 之间，需侧摆跨带，保守按拆处理`;
+      }
+      scopeJudge = { maxEdgeKm: +maxEdgeKm.toFixed(1), maxSwathKm, needSplit, reason, usableSats: usable.length };
+
+      if (!needSplit) {
+        // 不拆：跳过条带规划，走单任务路径
+        stripPlan = null;
+      } else {
+        const planned = normalizeTaskStrips({ geomType: 'polygon', geom: JSON.stringify({ coords: g.coords }) }, maxSwathKm);
+        if (planned.length > 1) stripPlan = planned;
+      }
+    } catch (e) { console.error('[order-intake] 覆盖判定失败，按单任务处理:', e.message); }
   }
   if (stripPlan) {
     const created = [];
@@ -208,6 +255,7 @@ dispatchApi.post("/order-intake", async (req, res) => {
     return res.json({
       ok: true, split: true, stripCount: stripPlan.length,
       parentArea: baseName,
+      scopeJudge,
       tasks: created.map(c => ({ taskId: c.taskId, taskNo: c.taskNo, stripIdx: c.stripIdx, taskName: c.taskName })),
       note: `面目标已按 ${stripPlan.length} 条带拆成 ${created.length} 个独立任务（每条带一单，可分别派单/直控）`,
     });
@@ -244,7 +292,8 @@ dispatchApi.post("/order-intake", async (req, res) => {
     return res.status(500).json({ error: "确认状态回读断言失败" });
 
   res.json({
-    ok: true, taskId: final.oldId ?? final.id, taskNo: final.taskNo, status: final.status,
+    ok: true, split: false, scopeJudge,
+    taskId: final.oldId ?? final.id, taskNo: final.taskNo, status: final.status,
     pendingConfirm: final.pendingConfirm, candidates: cand?.candidates ?? null,
     ranked: cand?.ranked ?? null, filtered: cand?.filtered ?? null,
     geomType: final.geomType,
@@ -1194,13 +1243,51 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   const uncoveredIdx = [];
   for (let i = 1; i <= totalStrips; i++) if (!stripGroups.has(i)) uncoveredIdx.push(i);
 
+  // ── 一个任务 = 一张订单（2026-11-16 用户口径）────────────────────────────
+  // 用户明确要求：「一条就是一个单，需要拆分条带在建单时就拆成多个任务，
+  // 不是一个任务派给一家公司两张订单」。
+  // 旧实现按条带逐条出单：一条"石景山区"任务会派出 PO-188/PO-189 两张单，
+  // 且可能用同一颗星拍两次（JILIN-01 KUANFU 02B 1 出现两次），用户无法理解。
+  // 新口径：本任务只出 1 张订单，取该任务所有条带里排名最优（rank 最小）的那个候选；
+  // 若原始区域需要多带覆盖，正确做法是建单时拆成多个独立任务（order-intake 已实现）。
+  if (coveredIdx.length > 1) {
+    console.warn(`[dispatch] 任务 ${task.taskNo} 含 ${coveredIdx.length} 条带，按新口径只出 1 张订单（取最优候选）；如需逐带下单请拆任务`);
+  }
+  const singleStripIdx = coveredIdx.length
+    ? coveredIdx.reduce((best, si) => {
+        const a = stripGroups.get(si), b = stripGroups.get(best);
+        return (a?.rank ?? 1e9) < (b?.rank ?? 1e9) ? si : best;
+      }, coveredIdx[0])
+    : null;
+  const orderStrips = singleStripIdx != null ? [singleStripIdx] : [];
+
   const batchOps = [];
   const createdOrders = [];
-  for (const si of coveredIdx) {
+  for (const si of orderStrips) {
     const rk = stripGroups.get(si);
     const oNo = `PO-${pbYmd()}-${String(await pbNextSeq("orderNo")).padStart(3, "0")}`;
     const oOld = await pbNextOldId("orders");
     createdOrders.push({ stripIdx: si, orderNo: oNo, oldId: oOld, satName: rk.satName, company: rk.company, rank: rk.rank ?? 0 });
+    // 执行明细（2026-11-16 用户要求「点开订单要能看出时间窗、怎么执行」）
+    const ovUtc = rk.overpassTime ?? null;
+    const ovMs = ovUtc ? new Date(ovUtc).getTime() : null;
+    const ovBJT = ovMs ? new Date(ovMs + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) : null;
+    const slew = rk.slewDeg ?? 0;
+    const cap0 = getCapability({ name: rk.satName ?? '' });
+    const effGsd = cap0?.resolution ? +(cap0.resolution * (1 + slew / Math.max(1, cap0.slewLimitDeg) * 0.5)).toFixed(2) : null;
+    const stDef = strips.find(x => x.idx === si) ?? {};
+    const imgSec = stDef.lengthKm ? +((stDef.lengthKm) / 6.83).toFixed(1) : null;
+    const execPlan = [
+      `过顶时刻 ${ovBJT ?? '-'}（北京时间）`,
+      `成像窗 ${rk.imgWinStart ? new Date(new Date(rk.imgWinStart).getTime() + 8 * 3600e3).toISOString().slice(11, 19) : '-'}~${rk.imgWinEnd ? new Date(new Date(rk.imgWinEnd).getTime() + 8 * 3600e3).toISOString().slice(11, 19) : '-'}`,
+      `侧摆 ${slew.toFixed(1)}°`,
+      `条带 ${si}/${strips.length}（${stDef.widthKm ?? 12}km × ${(stDef.lengthKm ?? 0).toFixed(1)}km）`,
+      `成像约 ${imgSec ?? '-'} 秒`,
+      `有效分辨率 ${effGsd ?? '-'}m`,
+      `条带覆盖率 ${rk.stripCoverage != null ? (rk.stripCoverage * 100).toFixed(1) + '%' : '-'}`,
+      `预报云量 ${rk.cloudFc != null ? (rk.cloudFc * 100).toFixed(0) + '%' : '-'}`,
+    ].join('；');
+
     batchOps.push({ table: "orders", oldId: oOld, data: {
       oldId: oOld,
       task: ref.rid, orderNo: oNo, channel, company: rk.company,
@@ -1209,14 +1296,25 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
       targetName: task.targetName, obsType: task.obsType, resolution: task.resolution,
       windowStart: task.windowStart, windowEnd: task.windowEnd, maxCloud: task.maxCloud ?? 0,
       deliveryDeadline: task.windowEnd, status: '已派发', createdAt: pbNow(),
+      // 执行明细：过顶/成像窗/侧摆/时长/幅宽/有效分辨率/条带/覆盖率/云量/执行摘要
+      overpassTime: ovUtc, overpassBJT: ovBJT,
+      imgWindowStart: rk.imgWinStart ?? null, imgWindowEnd: rk.imgWinEnd ?? null,
+      slewDeg: slew, imagingSec: imgSec,
+      swathKm: stDef.widthKm ?? 12, effGsdM: effGsd,
+      stripIdx: si, stripCount: strips.length,
+      coverPct: rk.stripCoverage != null ? +(rk.stripCoverage * 100).toFixed(1) : null,
+      cloudFc: rk.cloudFc ?? null,
+      execPlan,
       statusHistory: JSON.stringify([{ status: '已派发', time: new Date().toISOString(), source: '平台' }]),
     } });
   }
-  const fullCovered = uncoveredIdx.length === 0;
+  // 单任务单订单口径：有订单即「已派发」，无订单为「待派单」
+  const fullCovered = createdOrders.length > 0;
   batchOps.push({ table: "tasks", method: "UPDATE", recordId: ref.rid, data: { status: fullCovered ? '已派发' : '部分派发' } });
   batchOps.push({ table: "dispatchLog", data: { task: ref.rid, channel,
     company: createdOrders[0]?.company, rank: createdOrders[0]?.rank ?? 0, action: '派发',
-    detail: `${rule}；条带 ${coveredIdx.length}/${totalStrips} 已派${fullCovered ? '' : `，未覆盖 ${uncoveredIdx.length} 条`}`, at: pbNow() } });
+    detail: `${rule}；单任务单订单：取 rank 最优条带${singleStripIdx ?? '-'} 出 1 张单`
+      + (coveredIdx.length > 1 ? `（该任务含 ${coveredIdx.length} 条带，如需逐带下单请拆任务）` : ''), at: pbNow() } });
   const batchResults = await pbBatch(batchOps);
   const orderRec = batchResults[0];
   if (!orderRec?.ok) return res.status(500).json({ error: '订单落库失败', detail: orderRec?.data });
@@ -1405,6 +1503,69 @@ dispatchApi.post("/orders/:id/status", async (req, res) => {
   const failed = results.find(r => !r.ok);
   if (failed) return res.status(500).json({ error: '订单状态更新失败', detail: failed.data });
   res.json({ ok: true, status });
+});
+
+// 订单详情（2026-11-16 新增）：点开订单能看到「谁拍、什么时候、怎么拍」
+dispatchApi.get("/orders/:id", async (req, res) => {
+  const idp = String(req.params.id ?? '');
+  let order = null;
+  try {
+    if (/^\d+$/.test(idp)) order = await pbGetByOldId("orders", +idp);
+    else order = await pbGet("orders", idp);
+  } catch { order = null; }
+  if (!order) return res.status(404).json({ error: 'order not found' });
+
+  // 关联任务信息（任务号、目标、需求参数）
+  let task = null;
+  try { task = order.task ? await pbGet("tasks", order.task) : null; } catch { task = null; }
+
+  const bjt = (iso) => (iso && !isNaN(new Date(iso).getTime())
+    ? new Date(new Date(iso).getTime() + 8 * 3600e3).toISOString().replace('T', ' ').slice(0, 19) + ' 北京时'
+    : null);
+
+  res.json({
+    orderNo: order.orderNo,
+    status: order.status,
+    channel: order.channel,
+    company: order.company,
+    // 谁拍
+    satellite: { name: order.satName, noradId: order.satNoradId, rankUsed: order.rankUsed },
+    // 拍什么
+    target: {
+      name: order.targetName,
+      obsType: order.obsType,
+      resolutionRequired: order.resolution,
+      taskNo: task?.taskNo ?? null,
+      taskName: task?.taskName ?? null,
+      stripIdx: order.stripIdx ?? null,
+      stripCount: order.stripCount ?? null,
+    },
+    // 什么时候拍
+    timing: {
+      requirementWindow: { start: order.windowStart, end: order.windowEnd },
+      overpassUTC: order.overpassTime ?? null,
+      overpassBJT: order.overpassBJT ?? bjt(order.overpassTime),
+      imagingWindowUTC: { start: order.imgWindowStart ?? null, end: order.imgWindowEnd ?? null },
+      imagingWindowBJT: {
+        start: bjt(order.imgWindowStart), end: bjt(order.imgWindowEnd),
+      },
+    },
+    // 怎么拍
+    execution: {
+      slewDeg: order.slewDeg ?? null,
+      imagingSec: order.imagingSec ?? null,
+      swathKm: order.swathKm ?? null,
+      effectiveGsdM: order.effGsdM ?? null,
+      coverPct: order.coverPct ?? null,
+      cloudForecast: order.cloudFc ?? null,
+      planText: order.execPlan ?? null,
+    },
+    price: order.price ?? null,
+    fulfillment: order.fulfillment ?? null,
+    statusHistory: (() => { try { return JSON.parse(order.statusHistory || '[]'); } catch { return []; } })(),
+    createdAt: order.createdAt,
+    closedAt: order.closedAt,
+  });
 });
 
 dispatchApi.get("/orders", async (req, res) => {

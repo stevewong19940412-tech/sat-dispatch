@@ -167,6 +167,22 @@ const REQUIRED_FIELDS = {
   candidates: [
     { name: 'stripCoverage', type: 'number' },
   ],
+  orders: [
+    // 订单执行明细（2026-11-16 用户要求「点开订单要能看到时间窗和怎么执行」）
+    { name: 'overpassTime', type: 'text' },   // 实际过顶时刻 UTC
+    { name: 'overpassBJT', type: 'text' },    // 过顶时刻北京时间
+    { name: 'imgWindowStart', type: 'text' }, // 成像窗起
+    { name: 'imgWindowEnd', type: 'text' },   // 成像窗止
+    { name: 'slewDeg', type: 'number' },      // 侧摆角
+    { name: 'imagingSec', type: 'number' },   // 成像时长
+    { name: 'swathKm', type: 'number' },      // 幅宽
+    { name: 'effGsdM', type: 'number' },      // 有效分辨率（含侧摆退化）
+    { name: 'stripIdx', type: 'number' },     // 条带号
+    { name: 'stripCount', type: 'number' },   // 该任务条带总数
+    { name: 'coverPct', type: 'number' },     // 条带覆盖率
+    { name: 'cloudFc', type: 'number' },      // 预报云量
+    { name: 'execPlan', type: 'text' },       // 执行步骤摘要（文本）
+  ],
   tasks: [
     { name: 'multiPlan', type: 'text' },   // 分派方案 JSON，派单直接复用（避免重算分叉）
     // 区域拆单：记录所属父区域与条带序号，便于按区域汇总与前端分组展示

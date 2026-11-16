@@ -6,7 +6,11 @@ import { BladeProvider, ChatView } from "@blade-hq/agent-react";
 import "./blade-chat-full.css";
 import cliPyRaw from "./dispatch_cli.py?raw";
 import skillMdRaw from "./skill_dispatch_ops.md?raw";
-import roleMdRaw from "./role_prompt.md?raw";
+import roleMdRaw from "./role_prompt_v2.md?raw";
+import s1Raw from "./skills/s1-requirement.md?raw";
+import s2Raw from "./skills/s2-scope-judge.md?raw";
+import s3Raw from "./skills/s3-strip-split.md?raw";
+import s4Raw from "./skills/s4-plan-report.md?raw";
 // 部署自适应：把当前页面 origin 注入 CLI 环境（覆盖脚本内置的开发地址）
 const cliPy = cliPyRaw;
 const runtimeNote = `\n## 本次会话运行环境\n\n- 调度系统 API 地址：${location.origin}\n- dispatch_cli.py 第 10 行 APP_BASE 需替换为上面的地址后使用（或 export DISPATCH_APP_BASE=${location.origin} 后调用）。\n`;
@@ -38,45 +42,33 @@ function loadBaUrl() {
 // ─── Solution / Skill 声明（随会话交付）──────────────────────────────────
 const solutionFiles = [
   { path: "solution.yaml", content: `id: ${SOLUTION_ID}
-name: 遥感卫星任务下单助手
+name: 遥感卫星任务规划助手
 manifest_version: 3
-version: 0.1.0
+version: 1.0.0
 layout_type: default
 initial_mode: executing
-initial_message: 请描述您的遥感观测需求（目标位置、观测类型、分辨率、时间窗），我会解析成标准任务单并走调度流程。缺项我会一次列齐向您追问。
+initial_message: 请描述您的遥感观测需求（目标位置或区域、观测类型、分辨率、时间窗）。我会判断区域是否可单星一次覆盖——能就建一个任务，不能才按条带拆成多个独立任务，并给出过顶时刻与覆盖情况。
 skill_tools_enabled: true
 roles:
-  - dispatch-agent
+  - plan-agent
 ` },
-  { path: "roles/dispatch-agent/role.yaml", content: `id: dispatch-agent
-name: 遥感任务下单专员
-version: 0.1.0
-description: 把用户的观测需求解析为标准任务单，驱动候选计算与派单
+  { path: "roles/plan-agent/role.yaml", content: `id: plan-agent
+name: 遥感卫星任务规划专员
+version: 1.0.0
+description: 需求解析 → 覆盖范围判定 → 按需拆单 → 候选计算 → 输出规划方案。不含派单与直控（那是规划之后的功能侧操作）。
 layout_type: default
 initial_mode: executing
 ` },
-  { path: "roles/dispatch-agent/AGENTS.md.j2", content: `# 遥感卫星任务下单专员
-
-你唯一的业务身份是"遥感卫星任务下单专员"，服务需求方坐席下单。不要罗列平台通用能力。
-
-## 工作流程
-
-1. **理解需求**：用户会用自然语言描述观测需求。你从对话中提取：目标名称、目标位置（纬度/经度，没有就请用户提供或说明用地名近似）、观测类型（optical光学/sar雷达）、分辨率要求（米）、时间窗（起止）、最大云量、时效要求、优先级（常规/重点/应急）。
-2. **缺项澄清**：调用 \`dispatch help\` 了解字段含义。必填项（目标位置、观测类型、分辨率、时间窗）缺失时，**单轮合并追问一次列齐全部缺项，每项给建议取值**，不要挤牙膏式多轮追问。
-3. **创建任务**：调用 \`dispatch create '<JSON>'\` 创建标准任务单。JSON 字段：taskName/targetName/lat/lon/obsType/resolution/windowStart/windowEnd/maxCloud/timelinessHours/priority。时间窗用 ISO 格式。若返回 needClarify，按 missing 清单合并追问。
-4. **候选计算**：任务创建后主动调用 \`dispatch candidates <taskId>\`，向用户汇报通过约束筛选的候选数量、筛除原因分布和排序前三（卫星/公司/过顶时刻/综合评分）。
-5. **派单分流**：调用 \`dispatch dispatch <taskId>\`。应急任务会转直控流程并提示用户"待值班确认"；普通任务报告分流通道（指派/询价/抢单）和承接公司。
-6. **状态跟踪**：用户问进度时用 \`dispatch task <id>\` 查询任务详情（订单状态、履约记录、直控方案状态）。
-
-## 原则
-
-- 只用 \`dispatch\` CLI 查询和操作，禁止编造卫星数据、公司报价或调度结论。
-- 大模型只做理解与编排，调度结论（候选、排序、分流）全部来自确定性计算，如实转述。
-- 用户描述模糊时（点/面目标歧义、时间窗过宽、历史时相/未来成像不明），按三类歧义澄清。
-- 回答用业务语言，紧凑不啰嗦。` },
+  { path: "roles/plan-agent/AGENTS.md.j2", content: roleMd },
 ];
 
-const skillFiles = [{ path: "SKILL.md", content: skillMd }, { path: "dispatch_cli.py", content: cliPy }];
+// 规划链路的 4 个技能（按执行顺序），不含派单/直控
+const solutionSkills = [
+  { name: "my/plan-requirement", files: [{ path: "SKILL.md", content: s1Raw }, { path: "dispatch_cli.py", content: cliPy }] },
+  { name: "my/plan-scope-judge", files: [{ path: "SKILL.md", content: s2Raw }, { path: "dispatch_cli.py", content: cliPy }] },
+  { name: "my/plan-strip-split", files: [{ path: "SKILL.md", content: s3Raw }, { path: "dispatch_cli.py", content: cliPy }] },
+  { name: "my/plan-report", files: [{ path: "SKILL.md", content: s4Raw }, { path: "dispatch_cli.py", content: cliPy }] },
+];
 
 export const loaded = loadBaUrl();
 export const baUrl = loaded.value;
@@ -143,15 +135,15 @@ export function AgentPane({ visible, onClose, getContext, aoiContext, onAoiConsu
       let created;
       try {
         created = await client.sessions.create({
-          solution: { role: "dispatch-agent", files: solutionFiles },
-          skills: [{ name: "my/dispatch-ops", files: skillFiles }],
+          solution: { role: "plan-agent", files: solutionFiles },
+          skills: solutionSkills,
           config: { model },
         });
       } catch (e1) {
         setConnectError("首次连接超时，正在重试…");
         created = await client.sessions.create({
-          solution: { role: "dispatch-agent", files: solutionFiles },
-          skills: [{ name: "my/dispatch-ops", files: skillFiles }],
+          solution: { role: "plan-agent", files: solutionFiles },
+          skills: solutionSkills,
           config: { model },
         });
       }
