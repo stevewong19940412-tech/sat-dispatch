@@ -167,19 +167,33 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
  */
 export function shouldSplitOrder(strips, candByStrip, opt = {}) {
   const minCoverage = opt.minCoverage ?? 0.85;
-  // 单星最多能覆盖多少条带（同一颗星，不考虑时间冲突上限时）
+  // 单星"实际能覆盖"多少条带 —— 必须考虑时间冲突：
+  // 同一次过顶只能拍一条带，不同条带的过顶时刻若太近则冲突。
+  // 旧实现只数"这颗星有多少条带的候选"，忽略了冲突，会高估单星能力
+  // （实测出现：判定"无需拆单"，实际只分了 2/3 条带）。
   const satCovers = new Map();
   for (const st of strips) {
-    const list = candByStrip.get(st.idx) ?? [];
+    const list = (candByStrip.get(st.idx) ?? []).filter(c => (c.stripCoverage ?? 0) >= minCoverage);
     for (const c of list) {
-      if ((c.stripCoverage ?? 0) < minCoverage) continue;
-      if (!satCovers.has(c.satName)) satCovers.set(c.satName, new Set());
-      satCovers.get(c.satName).add(st.idx);
+      if (!satCovers.has(c.satName)) satCovers.set(c.satName, []);
+      satCovers.get(c.satName).push({ stripIdx: st.idx, overpass: c.overpass });
     }
   }
+  // 对每颗星按时间排序后做"最大不冲突子集"（贪心选最早结束且不冲突的）
   let best = 0, bestSat = null;
-  for (const [name, set] of satCovers) {
-    if (set.size > best) { best = set.size; bestSat = name; }
+  for (const [name, items] of satCovers) {
+    const uniq = new Map();               // 每条带只保留最早一次过顶
+    for (const it of items) {
+      const cur = uniq.get(it.stripIdx);
+      if (!cur || new Date(it.overpass) < new Date(cur.overpass)) uniq.set(it.stripIdx, it);
+    }
+    const arr = [...uniq.values()].sort((a, b) => new Date(a.overpass) - new Date(b.overpass));
+    let count = 0, last = -Infinity;
+    for (const it of arr) {
+      const t = new Date(it.overpass).getTime();
+      if (t - last >= 60000) { count++; last = t; }   // 相邻任务至少隔 60s
+    }
+    if (count > best) { best = count; bestSat = name; }
   }
   return {
     needSplit: best < strips.length,
