@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 10  # v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 11  # v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -73,8 +73,54 @@ def api_req(path, method="GET", body=None):
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
             return json.loads(r.read().decode())
-    except Exception as e:
-        die(f"API 调用失败: {e}")
+    except urllib.error.HTTPError as e:
+        # v11 修复：旧实现 `except Exception` 只输出 str(e)="HTTP Error 400: Bad Request"，
+        # 服务端返回的 {"error":"缺少必填参数 geomType"} 被丢弃 → 调用方只能靠猜、
+        # 反复试错（嘉手纳建单连报 400 就是这个原因）。这里把响应体完整打出来，
+        # 并在可解析时把 error/detail 提到首行，便于一眼定位。
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        hint = ""
+        try:
+            j = json.loads(raw)
+            msg = j.get("error") or j.get("message") or ""
+            det = j.get("detail") or ""
+            sug = j.get("suggestion") or ""
+            if msg:
+                hint = f"错误: {msg}"
+                if det: hint += f" | 详情: {det}"
+                if sug: hint += f" | 建议: {sug}"
+            # 结构化断言失败时把缺失字段直接列出来
+            if isinstance(j.get("missing"), list) and j["missing"]:
+                hint += f" | 缺失字段: {', '.join(map(str, j['missing']))}"
+        except Exception:
+            pass
+        die(f"HTTP {e.code} {method} {path}\n{hint}\n原始响应: {raw[:600]}")
+
+def _preflight_payload(body):
+    """建单前本地校验必填项，缺什么一次说清（不等服务端 400）。
+    与 /order-intake 的 need 列表保持一致；geom 结构另做形状检查。"""
+    need = ["taskName", "geomType", "geom", "obsType", "resolution", "windowStart", "windowEnd"]
+    missing = [k for k in need if body.get(k) is None]
+    probs = []
+    if missing:
+        probs.append(f"缺少必填参数: {', '.join(missing)}")
+    gt = body.get("geomType")
+    gm = body.get("geom")
+    if gt and gm is not None:
+        if gt == "point":
+            if not isinstance(gm, dict) or gm.get("lat") is None or gm.get("lon") is None:
+                probs.append('geomType=point 时 geom 必须是 {"lat":纬度,"lon":经度}')
+        else:
+            cs = gm.get("coords") if isinstance(gm, dict) else None
+            if not isinstance(cs, list) or len(cs) < 3:
+                probs.append('面目标 geom 必须是 {"coords":[[lat,lon],[lat,lon],...]}（≥3 顶点）')
+    if gt and gt not in ("point", "polygon", "area"):
+        probs.append(f"geomType 只能是 point/polygon/area，当前 {gt}")
+    return probs
 
 def q(sql, args=()):
     # 便捷查询：SQL 已随 PocketBase 迁移弃用（POST /_sql 移除）。
@@ -506,6 +552,16 @@ def main():
             body = _json.loads(arg)
         except Exception as e:
             die(f"参数必须是合法 JSON：{e}")
+        # 本地预检：缺项/geom 形状问题一次说清，不必等服务器 400 再猜
+        probs = _preflight_payload(body)
+        if probs:
+            die("建单参数不完整，请一次补齐后重试：\n  - " + "\n  - ".join(probs)
+                + "\n\n正确示例：\n  dispatch order-intake '" + _json.dumps({
+                    "taskName": "示例任务", "geomType": "point",
+                    "geom": {"lat": 26.35, "lon": 127.77},
+                    "obsType": "optical", "resolution": 2,
+                    "windowStart": "2026-11-17T00:00:00Z", "windowEnd": "2026-11-24T00:00:00Z",
+                    "maxCloud": 1, "priority": "重点"}, ensure_ascii=False) + "'")
         r = api_req("/order-intake", method="POST", body=body)
         print(_json.dumps(r, ensure_ascii=False, indent=1))
         if r.get("ok"):
