@@ -120,6 +120,110 @@ function clipStripY(poly, xLeft, xRight, yMin, yMax) {
  *   forceScale   强制指定尺度（测试用）
  * @returns {{scale,policy,strips,stats,direction,projection}}
  */
+/**
+ * 按给定方向切条带，算出「需要几条 + 总长度」（不做完整条带构造，只做评估）
+ *
+ * 这是文献里的核心评估函数：
+ *   宇航学报 2025 / CCDC 2026 / 航天东方红专利 一致认为
+ *   条带划分是 min(条带数) + min(总长度) 的双目标问题，NP-hard，无固定公式，
+ *   实践上对候选方向逐一评估、择优。
+ *
+ * @param polyKm  已投影到局部平面的多边形 [[x,y],...]（km）
+ * @param thetaDeg 条带方向（相对 x 轴的旋转角，弧度制由调用方转换）
+ * @param swathKm 幅宽
+ * @param overlapRate 相邻条带重叠率
+ * @param maxStripLenKm 单条带沿轨最大长度
+ * @returns { count, totalLenKm, uSpanKm, vSpanKm } 该方向下的条带数、总长、横跨/纵跨
+ */
+export function evalDirection(polyKm, thetaDeg, swathKm, overlapRate = 0.15, maxStripLenKm = 100) {
+  const th = thetaDeg * DEG;
+  const cosA = Math.cos(th), sinA = Math.sin(th);
+  // 旋转到「条带方向对齐 v 轴」的坐标系
+  const rot = polyKm.map(([x, y]) => [x * cosA + y * sinA, -x * sinA + y * cosA]);
+  const uMin = Math.min(...rot.map(p => p[0]));
+  const uMax = Math.max(...rot.map(p => p[0]));
+  const vMin = Math.min(...rot.map(p => p[1]));
+  const vMax = Math.max(...rot.map(p => p[1]));
+
+  const uSpan = uMax - uMin;          // 垂直条带方向的跨度 → 决定条带数
+  const vSpan = vMax - vMin;          // 沿条带方向的跨度 → 决定每带长度
+
+  const step = Math.max(1e-6, swathKm * (1 - overlapRate));
+  const count = Math.max(1, Math.ceil(uSpan / step));
+  // 每条带沿轨方向按 maxStripLen 分段
+  const segCount = Math.max(1, Math.ceil(vSpan / maxStripLenKm));
+  const segLen = vSpan / segCount;
+
+  return {
+    count: count * segCount,          // 总条带数（横 × 纵分段）
+    lateralCount: count,
+    segCount,
+    totalLenKm: +(count * segLen * segCount).toFixed(1),
+    uSpanKm: +uSpan.toFixed(1),
+    vSpanKm: +vSpan.toFixed(1),
+  };
+}
+
+/**
+ * 多方向择优：按文献方法选条带划分方向
+ *
+ * ⚠️ 关键约束（文献前提，不能违反）：
+ *   条带方向**必须与星下点轨迹平行**。被动推扫成像时卫星姿态固定，
+ *   只能沿轨迹方向扫；只有敏捷卫星"动中成像"才允许与轨迹成小夹角（通常 ≤10°）。
+ *   因此候选中**绝不能**包含任意方向（如正东西 90°/0°）——那些方向物理上拍不到。
+ *   曾误把 0°/90° 放进候选集，导致算法选出"条带数最少"却根本无法执行的方向。
+ *
+ * 目标（与 CCDC 2026 / 航天东方红专利一致）：
+ *   先最小化条带数，条带数相同则最小化总长度。
+ *   候选方向 = 轨迹方位角 ± 动中成像允许的偏角（默认 ±10° 内，5°/10° 档）。
+ *
+ * @returns { best: {thetaDeg, ...eval}, candidates: [...], reason }
+ */
+export function chooseBestDirection(polyKm, swathKm, centerLat, incDeg = 97.9, opt = {}) {
+  const overlapRate = opt.overlapRate ?? 0.15;
+  const maxStripLenKm = opt.maxStripLenKm ?? 100;
+  // 动中成像允许的最大偏角（度）。卫星侧摆/俯仰能力有限，超出即拍不到。
+  const maxSkewDeg = opt.maxSkewDeg ?? 10;
+
+  // 主方向：地面轨迹方位角（条带与轨迹平行，被动推扫的基准）
+  const trackAzDeg = (groundTrackAzimuth(incDeg, centerLat) / DEG);
+  // 候选只能在轨迹方位的小偏角邻域内（动中成像微调）
+  const cands = [trackAzDeg];
+  const step = 5;
+  for (let d = step; d <= maxSkewDeg + 1e-9; d += step) {
+    cands.push(trackAzDeg - d, trackAzDeg + d);
+  }
+
+  const results = [];
+  const seen = new Set();
+  for (const t of cands) {
+    const key = t.toFixed(2);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const ev = evalDirection(polyKm, t, swathKm, overlapRate, maxStripLenKm);
+    results.push({ thetaDeg: +t.toFixed(2), ...ev });
+  }
+
+  // 排序：条带数少优先，其次总长小；同等条件下偏向贴近轨迹方位（推扫效率高）
+  results.sort((a, b) => {
+    if (a.count !== b.count) return a.count - b.count;
+    if (Math.abs(a.totalLenKm - b.totalLenKm) > 0.5) return a.totalLenKm - b.totalLenKm;
+    return Math.abs(a.thetaDeg - trackAzDeg) - Math.abs(b.thetaDeg - trackAzDeg);
+  });
+
+  const best = results[0];
+  return {
+    best,
+    trackAzDeg: +trackAzDeg.toFixed(2),
+    candidates: results,
+    reason: `在轨迹方位 ${trackAzDeg.toFixed(2)}°±${maxSkewDeg}° 的 ${results.length} 个可行方向中，`
+      + `${best.thetaDeg}° 需 ${best.count} 条带（总长 ${best.totalLenKm}km）为最少`
+      + (Math.abs(best.thetaDeg - trackAzDeg) > 0.5
+        ? `，需动中成像偏 ${(best.thetaDeg - trackAzDeg).toFixed(1)}°`
+        : '（与轨迹平行，无需偏转）'),
+  };
+}
+
 export function planAreaStrips(coords, opt = {}) {
   const swathKm = opt.swathKm ?? 12;
   const incDeg = opt.incDeg ?? 97.9;
@@ -143,8 +247,11 @@ export function planAreaStrips(coords, opt = {}) {
   const policy = { ...SCALE_POLICY[scale.key] };
   if (opt.overlapRate != null) policy.overlapRate = opt.overlapRate;
 
-  // ── 条带方向：平行于地面轨迹 ──
-  const azimuth = groundTrackAzimuth(incDeg, cLat);
+  // ── 条带方向 ──
+  // 默认平行于地面轨迹（被动推扫基准）；
+  // opt.azimuthDeg 可由方向择优给出（动中成像），此时按指定方向铺带。
+  const trackAz = groundTrackAzimuth(incDeg, cLat);
+  const azimuth = opt.azimuthDeg != null ? opt.azimuthDeg * DEG : trackAz;
   const azDeg = (azimuth / DEG);
 
   // ── 在旋转坐标系中切片：把轨迹方向对齐到 v 轴 ──

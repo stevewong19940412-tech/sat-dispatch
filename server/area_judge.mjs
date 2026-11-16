@@ -18,7 +18,7 @@
 //   national > 8倍幅宽     → 多星多期（必须提示）
 
 import { getCapability } from './candidate_calc.mjs';
-import { planAreaStrips, groundTrackAzimuth } from './strip_planner.mjs';
+import { planAreaStrips, groundTrackAzimuth, makeProjection, chooseBestDirection } from './strip_planner.mjs';
 
 const KM_PER_DEG_LAT = 110.57;
 
@@ -90,6 +90,18 @@ export function deriveUsableSwath(satRows, obsType, resolutionM) {
   // 取「多数星都能达到」的宽度：75 分位（避免被极少数宽幅星拉高）
   const p75 = swaths[Math.min(swaths.length - 1, Math.floor(swaths.length * 0.75))];
 
+  // ── 动中成像偏角能力（文献依据）────────────────────────────────
+  // 条带方向原则上必须与星下点轨迹平行（传统 TDI-CCD 推扫的像移约束）。
+  // 只有敏捷星支持"动中成像"（条带与轨迹成夹角）：
+  //   · 高分多模卫星：官方标称「与星下点轨迹任意方向推扫」
+  //   · 泰景三号04星：偏离星下点 50°
+  //   · 传统推扫星：偏角 0°，偏了会引入像移导致 MTF 退化
+  // 用侧摆能力作敏捷性代理指标（侧摆 ≥35° 视为敏捷平台，允许 10° 偏角）。
+  const agileSats = usable.filter(u => (u.cap.slewLimitDeg ?? 0) >= 35);
+  const agileRatio = usable.length ? agileSats.length / usable.length : 0;
+  // 允许偏角：多数星敏捷才放开，否则强制平行轨迹
+  const maxSkewDeg = agileRatio >= 0.5 ? 10 : (agileRatio >= 0.2 ? 5 : 0);
+
   return {
     usableCount: usable.length,
     minSwathKm, maxSwathKm,
@@ -97,8 +109,16 @@ export function deriveUsableSwath(satRows, obsType, resolutionM) {
     p75SwathKm: p75,
     swathKm: p75,                     // 规划幅宽：75 分位，兼顾效率与可执行性
     widest: { name: usable[0].name, operator: usable[0].operator, swathKm: maxSwathKm },
+    // 动中成像能力
+    agileCount: agileSats.length,
+    agileRatio: +agileRatio.toFixed(2),
+    maxSkewDeg,
+    skewNote: maxSkewDeg > 0
+      ? `${agileSats.length}/${usable.length} 颗为敏捷平台，允许动中成像偏角 ≤${maxSkewDeg}°`
+      : '可用星以传统推扫为主，条带必须平行于星下点轨迹（偏角 0°）',
     top: usable.slice(0, 5).map(u => ({
       name: u.name, operator: u.operator, swathKm: u.cap.swathKm, resM: u.cap.resolution,
+      slewLimitDeg: u.cap.slewLimitDeg,
     })),
   };
 }
@@ -173,13 +193,29 @@ export function judgeArea({ coords, obsType, resolutionM, satRows, isPoint = fal
   // ⑤ 若需拆，用条带规划器算准确条带数（与建单完全同一套）
   // national 尺度（跨省/全国）不算精确条带数——那是几千条，既无意义也会拖垮计算，
   // 改为按幅宽粗估量级并提示分批。
-  let stripCount = 0, stripDetail = null;
+  let stripCount = 0, stripDetail = null, direction = null;
   if (needSplit && scale === 'national') {
     stripCount = Math.ceil(region.maxEdgeKm / W);
     stripDetail = { coarse: true, note: '跨省/全国尺度仅给量级估算，实际请按省或区域分批下单' };
   } else if (needSplit) {
     try {
-      const plan = planAreaStrips(coords, { swathKm: W });
+      // 按文献方法做方向择优：在轨迹方位 ±maxSkewDeg 内选条带数最少的方向
+      const proj = makeProjection(region.centerLat, (region.bbox.minLon + region.bbox.maxLon) / 2);
+      const polyKm = coords.map(proj.fwd);
+      const dirPick = chooseBestDirection(polyKm, W, region.centerLat, 97.9, {
+        maxSkewDeg: swath.maxSkewDeg,
+      });
+      direction = {
+        chosenDeg: dirPick.best.thetaDeg,
+        trackAzDeg: dirPick.trackAzDeg,
+        skewDeg: +(dirPick.best.thetaDeg - dirPick.trackAzDeg).toFixed(1),
+        reason: dirPick.reason,
+        candidates: dirPick.candidates.map(c => ({ thetaDeg: c.thetaDeg, count: c.count })),
+      };
+      const plan = planAreaStrips(coords, {
+        swathKm: W,
+        azimuthDeg: dirPick.best.thetaDeg,   // 用择优方向铺带，与判定一致
+      });
       stripCount = plan.stats.stripCount;
       stripDetail = {
         swathKm: plan.stats.swathKm,
@@ -201,6 +237,7 @@ export function judgeArea({ coords, obsType, resolutionM, satRows, isPoint = fal
     needSplit,
     stripCount,
     stripDetail,
+    direction,
     reason,
     nextStep: scale === 'national'
       ? `该区域需约 ${stripCount} 条带（量级估算），建议按省/区域分批下单，每批单独规划`
