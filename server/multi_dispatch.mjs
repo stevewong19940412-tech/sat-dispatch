@@ -257,6 +257,12 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
           const span = (new Date(cl[cl.length - 1].overpass) - new Date(cl[0].overpass)) / 1000;
           availSec = span + 60;
         }
+        // 容量口径（2026-11-16 第七轮验收修正）：
+        // 上一版 availSec 取"簇内候选窗并集"，但 candidates 里可能包含稍后被裁掉的条带，
+        // 其窗口把并集撑大（实测报 174s，而保留条带实际只有 154s），
+        // 于是 usedSec(160.6) < availSec(174) 被判"未超载"，实际却排不下。
+        // 正确口径：可用时长 = 保留集自身窗口的跨度（min 窗起点 → max 窗终点）。
+        // 因为成像动作必须在窗口内完成，窗口本身的长度就是物理上限。
         availSec = Math.max(availSec, 30);   // 单次过顶至少按 30s 计（保守下限）
 
         // ② 簇内联合约束：Σ成像时长 + Σ机动 ≤ 可用时长
@@ -280,6 +286,36 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
             sat: cl[0]?.satName, n: _dbgN, availSec: +_dbgAvail.toFixed(1),
             usedSec: +used.toFixed(1), removed: removedInCluster.length,
           });
+        }
+        // ②b 二次校验（关键）：用「保留集自身的窗口跨度」重新核算。
+        // 第一次用的是候选窗并集（可能被已裁条带撑大），会误判为不超载。
+        // 这里以保留条带为准再算一次，仍超载则继续裁，直到满足或只剩 1 条。
+        {
+          let guard = 0;
+          while (keptInCluster.length > 1 && guard++ < 200) {
+            let ks = Infinity, ke = -Infinity;
+            for (const x of keptInCluster) {
+              const a1 = x.imgWinStart ? new Date(x.imgWinStart).getTime() : new Date(x.overpass).getTime();
+              const b1 = x.imgWinEnd ? new Date(x.imgWinEnd).getTime() : a1 + 60000;
+              ks = Math.min(ks, a1); ke = Math.max(ke, b1);
+            }
+            const realAvail = (ke - ks) / 1000;
+            const realNeed = keptInCluster.reduce((acc, x) => acc + (x.stripLengthKm ?? 60) / 6.83, 0)
+                           + 12 * (keptInCluster.length - 1);
+            if (realNeed <= realAvail + 1e-6) break;      // 已满足
+            // 裁掉最长的一条（减少最多需求），并标记真实容量
+            let worst = 0;
+            for (let i = 1; i < keptInCluster.length; i++) {
+              if ((keptInCluster[i].stripLengthKm ?? 60) > (keptInCluster[worst].stripLengthKm ?? 60)) worst = i;
+            }
+            const cut = keptInCluster.splice(worst, 1)[0];
+            removedInCluster.push(cut);
+            if (constraintDebug) {
+              constraintDebug.push({ sat: cl[0]?.satName, stage: 'revalidate',
+                realAvail: +realAvail.toFixed(1), realNeed: +realNeed.toFixed(1),
+                cutStrip: cut.stripIdx, cutLenKm: cut.stripLengthKm });
+            }
+          }
         }
         // ③ 只 splice 本簇内被移除的记录
         for (const r of removedInCluster) {
@@ -322,14 +358,64 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     }
   }
 
+  // 账目补齐（2026-11-16 第七轮验收修正）：
+  // assignments ∪ gaps 必须覆盖全部 totalStrips，否则会出现"既没分配也没进缺口"的
+  // 静默丢失条带（实测 59 条带中 9 条无归属，前端会误以为只缺 30 条）。
+  {
+    const traced = new Set([
+      ...assignments.map(a => a.stripIdx),
+      ...gaps.map(g => g.stripId),
+    ]);
+    for (const st of strips) {
+      if (!traced.has(st.idx)) {
+        gaps.push({ stripId: st.idx, reason: '未通过覆盖阈值或未排入任何可用过顶' });
+      }
+    }
+  }
+
   // 约束执行摘要（写入返回体，验收可直接核对，不必翻代码）
+  // 审计口径：直接以**最终 assignments** 为准重新核算（与验收方的复算口径一致）。
+  // 上一版用的是裁剪过程中的中间变量，n/removed 与最终结果对不上。
+  const finalClusters = [];
+  {
+    const bySatF = new Map();
+    for (const a of assignments) {
+      if (!bySatF.has(a.satName)) bySatF.set(a.satName, []);
+      bySatF.get(a.satName).push(a);
+    }
+    for (const [, listF] of bySatF) {
+      const rs = listF.map(a => {
+        const ws = a.imgWinStart ? new Date(a.imgWinStart).getTime() : new Date(a.overpass).getTime();
+        const we = a.imgWinEnd ? new Date(a.imgWinEnd).getTime() : ws + 60000;
+        return { ws, we, L: a.stripLengthKm ?? 60, stripIdx: a.stripIdx };
+      }).sort((x, y) => x.ws - y.ws);
+      let grp = [rs[0]], gEnd = rs[0].we;
+      const flush = (g) => {
+        if (!g.length) return;
+        const avail = (Math.max(...g.map(x => x.we)) - Math.min(...g.map(x => x.ws))) / 1000;
+        const need = g.reduce((acc, x) => acc + x.L / 6.83, 0) + 12 * (g.length - 1);
+        finalClusters.push({
+          sat: listF[0].satName, n: g.length,
+          availSec: +avail.toFixed(1), needSec: +need.toFixed(1),
+          overLoaded: need > avail + 1e-6,
+          strips: g.map(x => x.stripIdx),
+        });
+      };
+      for (const x of rs.slice(1)) {
+        if (x.ws <= gEnd) { grp.push(x); gEnd = Math.max(gEnd, x.we); }
+        else { flush(grp); grp = [x]; gEnd = x.we; }
+      }
+      flush(grp);
+    }
+  }
   const constraintAudit = {
     enabled: true,
     buildTag: BUILD_TAG,
     totalStrips: strips.length,
     assignedAfterConstraint: assignments.length,
     removedByImagingTime: removedAllCount,
-    clusters: constraintDebug,
+    clusters: finalClusters,
+    overLoadedClusters: finalClusters.filter(c => c.overLoaded).length,
   };
 
   // ── 步骤3：汇总 ──

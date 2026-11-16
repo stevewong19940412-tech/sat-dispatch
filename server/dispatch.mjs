@@ -869,7 +869,11 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   // rankings JOIN candidates → PB relation+expand（candidate 被筛的不取，rank 升序）
-  const rankRes = await pbList("rankings", { filter: `task='${ref.rid}'`, sort: "rank", limit: 500, expand: "candidate" });
+  // 派单必须拿全量排名（2026-11-16 第七轮验收修正）：
+  // 旧代码 limit:500，本任务排名有 3865 条 → rank 靠后的条带回查不到，
+  // 20 条方案只出 9 单、且全集中在单星。改用 pbAll 翻页取全量。
+  const _allRank = await pbAll("rankings", { filter: `task='${ref.rid}'`, sort: "rank", expand: "candidate" });
+  const rankRes = { items: _allRank };
   const ranking = rankRes.items
     .filter(r => (r.expand?.candidate?.filtered ?? 1) === 0)
     .map(r => {
