@@ -49,11 +49,16 @@ export function gridPointsInStrip(strip, gridKm) {
   const [latS, lonS] = strip.start;
   const [latE, lonE] = strip.end;
   const widthKm = strip.widthKm ?? 12;
-  const lenKm = haversineKm(latS, lonS, latE, lonE);
+  let lenKm = haversineKm(latS, lonS, latE, lonE);
+  // 点目标：start/end 相同或缺失 → 条带长度为 0，网格数会算成 0 导致空迭代。
+  // 按"单景覆盖"口径取一个最小有效长度（一个幅宽的方形景）。
+  if (!Number.isFinite(lenKm) || lenKm < 0.1) lenKm = widthKm;
 
   // 网格数
   let nx = Math.max(2, Math.ceil(widthKm / gridKm));
   let ny = Math.max(2, Math.ceil(lenKm / gridKm));
+  if (!Number.isFinite(nx) || nx < 2) nx = 2;
+  if (!Number.isFinite(ny) || ny < 2) ny = 2;
   let coarse = false;
   const MAX_PTS = 2000;
   if (nx * ny > MAX_PTS) {
