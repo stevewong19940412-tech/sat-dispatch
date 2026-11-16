@@ -491,12 +491,15 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
         Math.abs(Math.max(...lats) - Math.min(...lats)) * 111,
         Math.abs(Math.max(...lons) - Math.min(...lons)) * 111 * Math.cos(geomObj.coords[0][0] * Math.PI / 180)
       );
-      // 条带宽度 = 传感器幅宽，不能按区域大小放大。
-      // 之前写成 min(maxSwath, spanKm*1.2)，对小区域正确（避免幅宽远大于目标），
-      // 但对大区域会把幅宽放大到上百 km，导致条带数骤减、每个条带都过长，
-      // 与"单条带 ≤100km"的分段策略冲突（北京全域一度只切出 6 条带）。
-      // 正确口径：取满足分辨率要求的最大幅宽，但不超过区域短边（避免一条带盖不满）。
-      swathForPlan = Math.max(12, Math.min(maxSwath, Math.max(12, spanKm)));
+      // 条带宽度口径（2026-11-16 定稿）：
+      //   · 宽度 = 满足任务分辨率的卫星中「**最小**幅宽」，而不是最大幅宽。
+      //   理由：条带是给"任意一颗能接单的星"用的公共划分。若按最大幅宽（如 60km）切，
+      //   则窄幅星（12km）根本无法覆盖一个 60km 宽带，只能拍中段；
+      //   按最小幅宽切，宽带星可以一次覆盖多条带（它的幅宽是条带的整数倍），
+      //   窄幅星也能正好覆盖一条带——这是"向下兼容"的安全划分。
+      //   · 长度上限 100km 由规划器负责分段。
+      const minSwath = caps.length ? Math.min(...caps.map(c => c.swathKm)) : 12;
+      swathForPlan = Math.max(12, Math.min(minSwath, Math.max(12, spanKm)));
     }
   } catch {}
   const strips = normalizeTaskStrips(task, swathForPlan);
