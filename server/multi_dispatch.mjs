@@ -29,13 +29,47 @@
 import { coverageGrade } from './coverage_grid.mjs';
 
 /**
- * 判断两个条带任务在同一颗星上是否时间冲突。
- * 同星相邻任务必须留出姿态机动 + 稳定 + 预热时间。
+ * 判断两个成像任务在同一颗星上是否时间冲突（2026-11-16 重写）。
+ *
+ * ## 旧实现的严重错误
+ * 旧版只比较两个任务的 TCA（最近过顶点时刻），相差 <60s 即判冲突。
+ * 但同一过顶内不同条带的 TCA 本来只差几秒——敏捷卫星恰恰能在一次过顶里
+ * 通过左右侧摆连续拍多条带（同轨多条带拼幅，见余婧 2015 / 唐忠兴 2014）。
+ * 结果：单星 14 条可拍条带被判"只能拍 1 条"，needSplit 恒为 true，
+ * 拆单判定失去区分度，覆盖率被低估一个数量级。
+ *
+ * ## 正确判据（敏捷卫星姿态机动约束）
+ * 两个任务可连续执行，当且仅当：
+ *   前一任务成像结束 → 姿态机动到新侧摆 → 稳定 → 后一任务成像开始，时间够用。
+ *   即：t_start(B) - t_end(A) >= |slewA - slewB| / slewRate + stabilize
+ *
+ * 若两任务的成像窗不重叠且满足上式 → 可顺序执行（同一次过顶多条带拼接）。
+ * 若成像窗重叠且时刻几乎相同 → 真正冲突（同一瞬间只能指一个方向）。
  */
-function conflicts(a, b, minGapSec = 60) {
-  const ta = new Date(a.overpass).getTime();
-  const tb = new Date(b.overpass).getTime();
-  return Math.abs(ta - tb) < minGapSec * 1000;
+function conflicts(a, b, opt = {}) {
+  const slewRate = opt.slewRateDegPerSec ?? 0.3;   // 型号典型：高分系 0.13~0.19°/s，敏捷商业星 0.5~1.5，取 0.3 保守
+  const stabilize = opt.stabilizeSec ?? 10;        // 姿态稳定时间典型 5~20s
+  const aStart = new Date(a.imgStart ?? a.overpass).getTime();
+  const aEnd = new Date(a.imgEnd ?? a.overpass).getTime();
+  const bStart = new Date(b.imgStart ?? b.overpass).getTime();
+  const bEnd = new Date(b.imgEnd ?? b.overpass).getTime();
+
+  // 情况1：时间上完全分离 → 检查机动时间是否够
+  if (bStart >= aEnd) {
+    const gap = (bStart - aEnd) / 1000;
+    const need = Math.abs((a.slewDeg ?? 0) - (b.slewDeg ?? 0)) / slewRate + stabilize;
+    return gap < need;
+  }
+  if (aStart >= bEnd) {
+    const gap = (aStart - bEnd) / 1000;
+    const need = Math.abs((a.slewDeg ?? 0) - (b.slewDeg ?? 0)) / slewRate + stabilize;
+    return gap < need;
+  }
+  // 情况2：成像窗重叠 —— 敏捷星可在同一次过顶连续侧摆，但若两任务成像时段
+  // 真正交叠（同一时刻要求指向两个方向），则冲突。
+  // 容差：成像动作极短（数秒~数十秒），允许 2s 的窗交叠（连续推扫换带）。
+  const overlap = Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
+  return overlap > 2000;
 }
 
 /**
@@ -92,7 +126,7 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
       const load = satLoad.get(c.satName) ?? 0;
       if (load >= satCapacity) continue;                       // 该星已达承载上限
       const tl = satTimeline.get(c.satName) ?? [];
-      if (tl.some(t => conflicts(t, c))) continue;             // 与同星已有任务时间冲突
+      if (tl.some(t => conflicts(t, c, { slewRateDegPerSec: opt.slewRateDegPerSec }))) continue; // 姿态机动/稳定时间不足
       if (!satLoad.has(c.satName) && satLoad.size >= maxSats) continue; // 卫星数上限
       picked = c; break;
     }
@@ -176,10 +210,14 @@ export function shouldSplitOrder(strips, candByStrip, opt = {}) {
     const list = (candByStrip.get(st.idx) ?? []).filter(c => (c.stripCoverage ?? 0) >= minCoverage);
     for (const c of list) {
       if (!satCovers.has(c.satName)) satCovers.set(c.satName, []);
-      satCovers.get(c.satName).push({ stripIdx: st.idx, overpass: c.overpass });
+      satCovers.get(c.satName).push({
+        stripIdx: st.idx, overpass: c.overpass, slewDeg: c.slewDeg,
+        imgStart: c.imgWinStart, imgEnd: c.imgWinEnd,
+      });
     }
   }
-  // 对每颗星按时间排序后做"最大不冲突子集"（贪心选最早结束且不冲突的）
+  // 对每颗星做"最大可执行子集"（贪心 + 姿态机动约束）
+  // 注意：不能简单地"相邻任务隔 60s"，那会把同轨多条带拼接全部排除。
   let best = 0, bestSat = null;
   for (const [name, items] of satCovers) {
     const uniq = new Map();               // 每条带只保留最早一次过顶
@@ -188,12 +226,12 @@ export function shouldSplitOrder(strips, candByStrip, opt = {}) {
       if (!cur || new Date(it.overpass) < new Date(cur.overpass)) uniq.set(it.stripIdx, it);
     }
     const arr = [...uniq.values()].sort((a, b) => new Date(a.overpass) - new Date(b.overpass));
-    let count = 0, last = -Infinity;
+    const accepted = [];
     for (const it of arr) {
-      const t = new Date(it.overpass).getTime();
-      if (t - last >= 60000) { count++; last = t; }   // 相邻任务至少隔 60s
+      if (accepted.some(x => conflicts(x, it, { slewRateDegPerSec: opt.slewRateDegPerSec }))) continue;
+      accepted.push(it);
     }
-    if (count > best) { best = count; bestSat = name; }
+    if (accepted.length > best) { best = accepted.length; bestSat = name; }
   }
   return {
     needSplit: best < strips.length,

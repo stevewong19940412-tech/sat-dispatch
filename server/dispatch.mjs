@@ -724,12 +724,24 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
         areaCoveredKm2: multi.coverage.areaCoveredKm2,
         spanDays: multi.stats.spanDays,
         gaps: multi.gaps.slice(0, 30),
+        // 口径说明：multiSatellite.coveragePct 是「按可执行分派方案实际排进去的条带占比」，
+        // 而 coveragePlan.coveragePct 是「有可用候选的条带占比」。
+        // 前者才是真实可交付的覆盖率，统一以后者为准（见下方 authoritativeCoverage）。
+        authoritative: true,
         assignments: multi.assignments.map(a => ({
           stripIdx: a.stripIdx, satName: a.satName, company: a.company,
           overpass: a.overpass, slewDeg: a.slewDeg,
           coveragePct: +(a.coverage * 100).toFixed(1), grade: a.grade,
         })),
       };
+      // 统一覆盖率口径（修复 F4：同一响应出现 44.1% / 30.5% / 96.6% 三个数）
+      // 以「分派方案实际排进去的条带数」为准，其余口径全部对齐。
+      const ms = coveragePlan.multiSatellite;
+      coveragePlan.coveragePctCandidate = coveragePlan.coveragePct;      // 保留旧口径备查
+      coveragePlan.coveragePct = ms.coveragePct;                          // 对外唯一口径
+      coveragePlan.scheduled = ms.assignedStrips;
+      coveragePlan.unscheduled = ms.totalStrips - ms.assignedStrips;
+      coveragePlan.coverageBasis = '按多星分派方案实际可执行条带数';
     } catch (e) {
       console.error('[multi-dispatch] 分派失败:', e.message);
     }
@@ -892,22 +904,36 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     stripById.set(c.id, c.stripIdx ?? 1);
     if (c.oldId != null) stripById.set(c.oldId, c.stripIdx ?? 1);
   }
-  // 每个条带选出「覆盖率最高且通过约束」的候选。
-  // 注意：不能只按 rank 取第一个——rank 是优先级分，不含覆盖率；
-  // 一个 rank 高但覆盖率仅 60% 的候选，不如 rank 低但覆盖 100% 的。
-  const stripGroups = new Map();
+  // ── 派单必须按「多星协同分派方案」执行（2026-11-16 修复 P0-F1）─────────
+  // 旧实现:每个条带各自选覆盖率最高的候选就出单,完全不检查同星时间冲突,
+  //   实测派出 57 单里 45 处同星 0~9 秒冲突 —— 物理上无法执行。
+  // 新实现:重新跑 dispatchAcrossSatellites 拿到「可执行的」分派方案,
+  //   按该方案逐条出单;无法排进去的条带明确列为缺口并给真实原因。
+  const candByStrip = new Map();
   for (const rk of ranking) {
     const si = rk.stripIdx ?? stripById.get(rk.candidateId) ?? 1;
-    const cur = stripGroups.get(si);
-    if (!cur) { stripGroups.set(si, rk); continue; }
-    const rc = rk.stripCoverage ?? 0, cc = cur.stripCoverage ?? 0;
-    if (rc > cc + 0.02 || (Math.abs(rc - cc) <= 0.02 && (rk.rank ?? 1e9) < (cur.rank ?? 1e9))) {
-      stripGroups.set(si, rk);
-    }
+    if (!candByStrip.has(si)) candByStrip.set(si, []);
+    candByStrip.get(si).push(rk);
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
     .reduce((mx, c) => Math.max(mx, c.stripIdx ?? 1), 1);
+  const allStripDefs = [];
+  for (let i = 1; i <= totalStrips; i++) allStripDefs.push({ idx: i });
+
+  const plan = dispatchAcrossSatellites(allStripDefs, candByStrip, { minCoverage: 0.85 });
+  // 用条带号 + 卫星名回查原始 ranking 记录（订单要写 satNoradId/rank 等字段）
+  const rkIndex = new Map();
+  for (const rk of ranking) {
+    const si = rk.stripIdx ?? stripById.get(rk.candidateId) ?? 1;
+    rkIndex.set(`${si}|${rk.satName}`, rk);
+  }
+  const stripGroups = new Map();
+  for (const a of plan.assignments) {
+    const rk = rkIndex.get(`${a.stripIdx}|${a.satName}`);
+    if (rk) stripGroups.set(a.stripIdx, rk);
+  }
   const coveredIdx = [...stripGroups.keys()].sort((a, b) => a - b);
+  const gapByStrip = new Map((plan.gaps ?? []).map(g => [g.stripId, g.reason]));
   const uncoveredIdx = [];
   for (let i = 1; i <= totalStrips; i++) if (!stripGroups.has(i)) uncoveredIdx.push(i);
 
@@ -949,6 +975,10 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
       coveragePct: totalStrips ? +((coveredIdx.length / totalStrips) * 100).toFixed(1) : 100,
       orders: createdOrders,
       uncoveredStrips: uncoveredIdx,
+      gapReasons: uncoveredIdx.map(i => ({ stripId: i, reason: gapByStrip.get(i) ?? '无可用候选' })),
+      satelliteCount: plan.stats.satelliteCount,
+      satellites: plan.satellites,
+      multiSatellitePlan: true,
       warning: fullCovered ? null
         : `仅 ${coveredIdx.length}/${totalStrips} 条带已派单，剩余 ${uncoveredIdx.length} 条带无可用候选，任务状态标为「部分派发」`,
     },
