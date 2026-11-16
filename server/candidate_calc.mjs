@@ -593,12 +593,19 @@ export function applyConstraints(candidate, task, sat, cap) {
   // 这类候选**不能出现在候选里**（旧实现完全不校验，PO-20261116-205 的
   // rank1/rank2 覆盖率 0 却排在最前面，派单时才被跳过 → 用户以为派错）。
   // 门槛取 0.5：低于一半的条带即使拍到，拼接价值也很低（文献：相邻条带需充分重叠）。
-  const minCoverage = task.minStripCoverage ?? 0.5;
-  if (candidate.stripCoverage != null && candidate.stripCoverage < minCoverage) {
-    const pct = (candidate.stripCoverage * 100).toFixed(0);
-    reasons.push(candidate.stripCoverage < 0.01
-      ? '条带不可覆盖：本次过顶拍不到该条带'
-      : `条带覆盖不足：仅覆盖${pct}%，低于门槛${(minCoverage*100).toFixed(0)}%`);
+  // 分两档处理：
+  //  · 覆盖率 < 1%（几何上拍不到该条带）→ **一律筛除**，无论门槛设多少。
+  //    这类候选排在候选表里只会误导用户（用户明确要求"覆盖率为 0 不能出现在候选中"）。
+  //  · 1% ≤ 覆盖率 < 门槛(默认50%) → 筛除但保留在诊断行里，说明"覆盖不足"。
+  // 门槛可用 task.minStripCoverage 调；设为 0 时仅筛除 0 覆盖，用于宽幅星补拍场景。
+  const minCoverage = task.minStripCoverage != null ? Number(task.minStripCoverage) : 0.5;
+  if (candidate.stripCoverage != null) {
+    const cov = candidate.stripCoverage;
+    if (cov < 0.01) {
+      reasons.push('条带不可覆盖：本次过顶拍不到该条带');
+    } else if (cov < minCoverage) {
+      reasons.push(`条带覆盖不足：仅覆盖${(cov * 100).toFixed(0)}%，低于门槛${(minCoverage * 100).toFixed(0)}%`);
+    }
   }
   return { pass: reasons.length === 0, reasons, validRes: gcand };
 }
@@ -627,3 +634,5 @@ export function getCapability(sat) {
 
 // 历史常量保留导出：仅作兜底与文档参考，覆盖判定已不使用
 export const DEFAULT_CAPS_LEGACY = DEFAULT_CAPS;
+// deploy trigger 1794823324
+// gate2 1794823538
