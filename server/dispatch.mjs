@@ -495,19 +495,48 @@ dispatchApi.post("/_cleanup", async (req, res) => {
   res.json({ ok: true, cleared });
 });
 
+// 删除任务（含级联清理）
+// 2026-11-16 修复 503：用户点删除报 503 Service Unavailable。
+// 根因：pbResolveTask 从进程内缓存或 oldId 解析出一个 record id，但该记录可能已被
+// 之前的多轮批量清理删掉 → pbDelete 收到 PB 的 404 → 未捕获 → 被 /api 兜底中间件
+// 包装成 503「数据服务暂不可用」。用户看到的是服务挂了，实际只是记录不存在。
+// 修法：1) 删除前先确认记录存在，不存在视为已删除（幂等成功）
+//       2) pbDelete 的 404 显式吞掉，不让它升级成 503
 dispatchApi.delete("/tasks/:id", async (req, res) => {
-  const ref = await pbResolveTask(req.params.id);
-  if (ref) {
-    // 级联清理：candidates / rankings / orders / directPlans 四处关联记录先查后删
-    for (const table of ["candidates", "rankings", "orders", "directPlans"]) {
-      try {
-        const rel = await pbAll(table, { filter: `task='${ref.rid}'`, fields: "id" });
-        for (const rec of rel) await pbDelete(table, rec.id);
-      } catch (e) {
-        console.error(`[delete] 级联清理 ${table} 失败: ${e.message.slice(0, 120)}`);
+  let ref = null;
+  try { ref = await pbResolveTask(req.params.id); } catch (e) { ref = null; }
+
+  // 记录已不在（或 id 解析失败）→ 幂等返回成功，不报错
+  if (!ref) return res.json({ ok: true, alreadyDeleted: true });
+
+  let existed = false;
+  try {
+    const rec = await pbGet("tasks", ref.rid);
+    existed = !!rec;
+  } catch (e) {
+    existed = e?.status !== 404;      // 404 = 确已不存在
+  }
+  if (!existed) return res.json({ ok: true, alreadyDeleted: true });
+
+  // 级联清理：candidates / rankings / orders / directPlans 四处关联记录先查后删
+  for (const table of ["candidates", "rankings", "orders", "directPlans"]) {
+    try {
+      const rel = await pbAll(table, { filter: `task='${ref.rid}'`, fields: "id" });
+      for (const rec of rel) {
+        try { await pbDelete(table, rec.id); }
+        catch (e) { if (e?.status !== 404) console.error(`[delete] ${table}/${rec.id}: ${e.message.slice(0, 80)}`); }
       }
+    } catch (e) {
+      console.error(`[delete] 级联清理 ${table} 失败: ${e.message.slice(0, 120)}`);
     }
+  }
+  try {
     await pbDelete("tasks", ref.rid);
+  } catch (e) {
+    if (e?.status !== 404) {
+      console.error(`[delete] 删除任务失败: ${e.message.slice(0, 120)}`);
+      return res.status(500).json({ error: '删除任务失败', detail: String(e.message).slice(0, 200) });
+    }
   }
   res.json({ ok: true });
 });

@@ -39,7 +39,19 @@ const _idCache = new Map(); // table → Map(oldId → recordId)
 const _revCache = new Map(); // table → Map(recordId → oldId)
 export async function pbRecordId(table, oldId) {
   let m = _idCache.get(table);
-  if (m?.has(oldId)) return m.get(oldId);
+  if (m?.has(oldId)) {
+    const cached = m.get(oldId);
+    // 缓存可能指向已删除的记录（多轮批量清理后 oldId 被重新使用）。
+    // 命中后做一次存在性校验，失效则清除缓存重新查，避免下游 DELETE 收到 404
+    // 被包装成 503「数据服务暂不可用」（用户点删除任务的报错根因）。
+    try {
+      await api(`/api/collections/${COL(table)}/records/${cached}?fields=id`);
+      return cached;
+    } catch (e) {
+      if (e?.status === 404) { m.delete(oldId); _revCache.get(table)?.delete(cached); }
+      else return cached;   // 其他错误不改变映射
+    }
+  }
   m = m || new Map(); _idCache.set(table, m);
   const r = await api(`/api/collections/${COL(table)}/records?filter=${encodeURIComponent(`oldId=${oldId}`)}&perPage=1&fields=id,oldId`);
   if (r.items?.[0]) { m.set(oldId, r.items[0].id); return r.items[0].id; }
