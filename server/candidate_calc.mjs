@@ -588,6 +588,18 @@ export function applyConstraints(candidate, task, sat, cap) {
   if (sat.subCategory !== 'sar' && candidate.cloudFc > task.maxCloud) {
     reasons.push(`云量超限：预报${(candidate.cloudFc*100).toFixed(0)}% > 任务上限${(task.maxCloud*100).toFixed(0)}%`);
   }
+  // ── 条带覆盖率门槛（2026-11-16 用户要求）──────────────────────────────
+  // 覆盖率 = 该星这次过顶能覆盖这条带的比例。为 0 表示几何上根本拍不到，
+  // 这类候选**不能出现在候选里**（旧实现完全不校验，PO-20261116-205 的
+  // rank1/rank2 覆盖率 0 却排在最前面，派单时才被跳过 → 用户以为派错）。
+  // 门槛取 0.5：低于一半的条带即使拍到，拼接价值也很低（文献：相邻条带需充分重叠）。
+  const minCoverage = task.minStripCoverage ?? 0.5;
+  if (candidate.stripCoverage != null && candidate.stripCoverage < minCoverage) {
+    const pct = (candidate.stripCoverage * 100).toFixed(0);
+    reasons.push(candidate.stripCoverage < 0.01
+      ? '条带不可覆盖：本次过顶拍不到该条带'
+      : `条带覆盖不足：仅覆盖${pct}%，低于门槛${(minCoverage*100).toFixed(0)}%`);
+  }
   return { pass: reasons.length === 0, reasons, validRes: gcand };
 }
 

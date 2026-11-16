@@ -736,7 +736,12 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
         const { cloud, source: cloudSrc } = await forecastCloudReal(strip.lat, strip.lon, overpass, leadDays);
         const sunEl = solarElevationDegFor(strip.lat, strip.lon, overpass);
         const { ceff, availability } = cloudEffective(cloud, w.slewDeg, sunEl);
-        const cand = { slewDeg: w.slewDeg, overpassTime: overpass.toISOString(), cloudFc: cloud };
+        // stripCoverage 必须带进约束判定：覆盖率 0 = 几何上拍不到该条带，
+        // 这类候选不应进入候选列表（旧实现漏传，导致拍不到的星照样排在 rank1）
+        const cand = {
+          slewDeg: w.slewDeg, overpassTime: overpass.toISOString(), cloudFc: cloud,
+          stripCoverage: w.stripCoverage,
+        };
         const { pass, reasons, validRes } = applyConstraints(cand, task, sat, cap);
         if (!pass) {
           filtered++;
