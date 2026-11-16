@@ -704,15 +704,33 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
     // 依据集合覆盖模型（Perea 2015 IEEE TAES / CN115659556A / Chen 2020 RS）：
     //   目标 = 最大化覆盖率，同时尽量少用卫星；贪心选取"单位资源增益最高"的分配。
     try {
+      // 把综合排名（rank/S）带进候选池，供分派器按"排名优先"选星。
+      // 否则分派器无从判断哪颗星更优，可能选出排名 400+ 的劣质候选。
+      const rankBySatStrip = new Map();
+      try {
+        const rankRows = await pbAll("rankings", { filter: `task='${ref.rid}'`, expand: "candidate" });
+        for (const rr of rankRows) {
+          const c = rr.expand?.candidate;
+          if (!c) continue;
+          const key = `${c.stripIdx ?? 1}|${c.satName}`;
+          const prev = rankBySatStrip.get(key);
+          if (!prev || (rr.rank ?? 1e9) < (prev.rank ?? 1e9)) {
+            rankBySatStrip.set(key, { rank: rr.rank, S: rr.S });
+          }
+        }
+      } catch (e) { console.error('[multi] 读取排名失败:', e.message); }
+
       const candByStrip = new Map();
       for (const r of passingRows) {
         const si = r.stripIdx ?? 1;
         if (!candByStrip.has(si)) candByStrip.set(si, []);
         const stDef = strips.find(x => x.idx === si);
+        const rkInfo = rankBySatStrip.get(`${si}|${r.satName}`) ?? {};
         candByStrip.get(si).push({
           satName: r.satName, satNoradId: r.satNoradId, company: r.company,
           overpass: r.overpassTime, slewDeg: r.slewDeg,
           stripCoverage: r.stripCoverage, imgWinStart: r.imgWinStart, imgWinEnd: r.imgWinEnd,
+          rank: rkInfo.rank ?? null, S: rkInfo.S ?? null,
           // 字段名必须是 stripLengthKm —— 分派器读的是 picked.lengthKm / strip.lengthKm，
           // 而 candidates 侧此前只写了 lengthKm，导致恒取兜底 60km，
           // 成像时长约束用错长度、超载簇没被裁掉（第五轮验收 P0-1）。
@@ -1008,10 +1026,18 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   if (!plan) plan = dispatchAcrossSatellites(allStripDefs, candByStrip, { minCoverage: 0.85 });
   plan.reused = !!task.multiPlan;
   // 用条带号 + 卫星名回查原始 ranking 记录（订单要写 satNoradId/rank 等字段）
+  // 关键修正（2026-11-16，用户报 RSBH-20261116-160 派给资源卫星中心而非 rank1 长光）：
+  // 同一条带 + 同一颗星可能有多条候选（不同过顶时刻），旧实现直接 set 覆盖，
+  // 后遍历到的（排名靠后、分数更差的）会盖掉前面的 rank1。
+  // 实测该任务 rankings 有 567 条，白名单 idx 用的是 rank433（S=4.28），
+  // 而 rank1 是 S=79.6 的最优候选——这就是"列表第一位是长光、实际派出资源卫星中心"的根因。
+  // 正确做法：同一 (条带,卫星) 只保留 rank 最小（最优）的那条。
   const rkIndex = new Map();
   for (const rk of ranking) {
     const si = rk.stripIdx ?? stripById.get(rk.candidateId) ?? 1;
-    rkIndex.set(`${si}|${rk.satName}`, rk);
+    const key = `${si}|${rk.satName}`;
+    const cur = rkIndex.get(key);
+    if (!cur || (rk.rank ?? 1e9) < (cur.rank ?? 1e9)) rkIndex.set(key, rk);
   }
   const stripGroups = new Map();
   for (const a of plan.assignments) {

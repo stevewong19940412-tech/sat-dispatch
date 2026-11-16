@@ -139,14 +139,22 @@ export function dispatchAcrossSatellites(strips, candByStrip, opt = {}) {
     // 候选尝试顺序（2026-11-16 修正）：先试「能与该星已有任务排进同一过顶」的候选，
     // 再试其他候选。否则会出现：贪心选了颗已被占满的星 → 判冲突 → 该条带被判缺口，
     // 而实际另一颗星/另一个过顶完全能拍（实测 3 条带只分 2 条、却判"无需拆单"的矛盾）。
+    // 候选排序（2026-11-16 修正）：必须尊重综合排名 rank（优先级分数 S）。
+    // 旧实现只看"能否排入 + 覆盖率 + 过顶早晚"，完全无视 rank，
+    // 导致界面上排第一（S=79.6）的候选不一定被选中，实际可能派给排名 400+ 的劣质候选。
+    // 现在的优先级：能排入 > 排名靠前（rank 小）> 条带覆盖率高 > 过顶时间早。
     const ordered = [...candidates].sort((x, y) => {
       const tx = satTimeline.get(x.satName) ?? [];
       const ty = satTimeline.get(y.satName) ?? [];
       const fx = tx.some(t => conflicts(t, x, opt)) ? 1 : 0;
       const fy = ty.some(t => conflicts(t, y, opt)) ? 1 : 0;
-      if (fx !== fy) return fx - fy;                       // 可排入的优先
-      if (Math.abs(y.stripCoverage - x.stripCoverage) > 0.02) return y.stripCoverage - x.stripCoverage;
-      return new Date(x.overpass) - new Date(y.overpass);   // 时间早的优先
+      if (fx !== fy) return fx - fy;                       // ① 可排入的优先
+      const rx = x.rank ?? 1e9, ry = y.rank ?? 1e9;
+      if (rx !== ry) return rx - ry;                        // ② 排名靠前优先（S 高）
+      if (Math.abs((y.stripCoverage ?? 0) - (x.stripCoverage ?? 0)) > 0.02) {
+        return (y.stripCoverage ?? 0) - (x.stripCoverage ?? 0);   // ③ 覆盖率高优先
+      }
+      return new Date(x.overpass) - new Date(y.overpass);   // ④ 时间早优先
     });
     let picked = null;
     for (const c of ordered) {
