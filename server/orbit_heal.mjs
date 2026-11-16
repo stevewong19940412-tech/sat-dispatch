@@ -7,7 +7,23 @@
 // 幂等：数据正常时不做任何写入。
 
 import * as satellite from "satellite.js";
-import { pbAll, pbUpdate } from "./pb_repo.mjs";
+import { pbAll, pbUpdate, pbAuth } from "./pb_repo.mjs";
+
+const PB_URL = process.env.PB_URL || "http://127.0.0.1:8091";
+let _token = null;
+async function api(path, method = "GET", body = null) {
+  if (!_token) _token = await pbAuth();
+  const r = await fetch(PB_URL + path, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: _token },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    _token = null;
+    throw new Error(`${method} ${path} -> ${r.status} ${(await r.text()).slice(0, 200)}`);
+  }
+  return r.json();
+}
 
 const EARTH_R_KM = 6371;
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -141,4 +157,35 @@ export async function healSatelliteMeta() {
   if (ops.length) console.log(`[meta-heal] 卫星国家/类别已校正 ${ops.length} 颗`);
   else console.log('[meta-heal] 卫星国家/类别正常，无需修正');
   return { fixed: ops.length, checked: sats.length };
+}
+
+// ─── PB 集合字段补齐（2026-11-16）───────────────────────────────────────────
+// 背景：新增业务字段（如 candidates.stripCoverage）时，PB collection 不会自动加，
+//   写入会被静默丢弃，表现为"代码改了但字段一直是 null"。
+// 这里在启动时检查并补齐必需字段（幂等，已存在则跳过）。
+const REQUIRED_FIELDS = {
+  candidates: [
+    { name: 'stripCoverage', type: 'number' },
+  ],
+};
+
+export async function healCollectionFields() {
+  let added = 0;
+  for (const [table, fields] of Object.entries(REQUIRED_FIELDS)) {
+    try {
+      const col = await api(`/api/collections/${table}`);
+      if (!col?.fields) continue;
+      const have = new Set(col.fields.map(f => f.name));
+      const missing = fields.filter(f => !have.has(f.name));
+      if (!missing.length) continue;
+      const newFields = [...col.fields, ...missing.map(f => ({ name: f.name, type: f.type, required: false }))];
+      await api(`/api/collections/${col.id}`, 'PATCH', { fields: newFields });
+      added += missing.length;
+      console.log(`[field-heal] ${table} 补齐字段: ${missing.map(f => f.name).join(', ')}`);
+    } catch (e) {
+      console.error(`[field-heal] ${table} 失败:`, e.message);
+    }
+  }
+  if (!added) console.log('[field-heal] 集合字段完整，无需补齐');
+  return { added };
 }

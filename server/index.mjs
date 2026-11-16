@@ -253,6 +253,7 @@ createServer(app).listen(PORT, "0.0.0.0", () => {
     .then(async (m) => {
       await m.healOrbitParams();
       await m.healSatelliteMeta();
+      await m.healCollectionFields();
     })
     .catch(e => console.error("[startup] PB 初始化/数据自愈失败:", e.message));
 });
