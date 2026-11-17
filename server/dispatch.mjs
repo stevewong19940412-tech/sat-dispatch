@@ -65,6 +65,7 @@ import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
 import { summarizeCoveragePlan, planAreaStrips } from "./strip_planner.mjs";
 import { judgeArea, regionSize, deriveUsableSwath } from "./area_judge.mjs";
+import { validatePlan } from "./plan_validator.mjs";
 import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
 import { coverageGrade } from "./coverage_grid.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
@@ -1033,9 +1034,34 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       truncationNote: `候选行数达上限（${totalCandidatesHardCap}），部分条带候选未完整解算，实际覆盖可能低于统计值` };
   }
 
+  // ── 工程侧校验（2026-11-17 用户要求）──────────────────────────────────
+  // AI 规划完成后由系统独立校验；不通过则阻断，把问题清单发回 solution 侧重规划，
+  // 而不是等人工在工作台发现「派不了 / 拍不到 / 编号对不上」。
+  let planCheck = null;
+  try {
+    const passRows = candOps
+      .filter(op => op.table === 'candidates')
+      .map(op => op.data)
+      .filter(d => (d.filtered ?? 0) === 0);
+    planCheck = validatePlan({
+      task, strips: strips.length, candidates: passRows,
+      satRows: (await pbAll("satellites", { filter: "decayed=0" })),
+      multiPlan: (() => { try { return JSON.parse(task.multiPlan ?? 'null'); } catch { return null; } })(),
+      constraintAudit: coveragePlan?.constraintAudit ?? null,
+      stage: 'candidates',
+    });
+  } catch (e) {
+    console.error('[plan-validator] 校验异常:', e.message);
+    planCheck = { status: 'WARN', stage: 'candidates', canProceed: true,
+      checks: [], problems: [], suggestions: [], summary: `校验模块异常（${e.message}），未阻断` };
+  }
+  // 落库留痕，派单前可复查
+  try { await pbUpdate("tasks", ref.rid, { planCheck: JSON.stringify(planCheck) }); } catch {}
+
   res.json({
     taskId: taskNumId, strips: strips.length, candidates: inserted, filtered, ranked, gapStats, planningDiagnosis,
     coveragePlan, coverageWarning,
+    planCheck,
     // 覆盖计划：把"测哪个区域、拆成几条带、沿什么方向、重叠多少"直接返回给调用方
     areaPlan: areaPlan ? {
       scale: areaPlan.scaleLabel,
@@ -1116,6 +1142,40 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     })
     .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });
+
+  // ── 派单前工程侧复检（2026-11-17 用户要求）────────────────────────────
+  // 候选算完时已校验过一次，但排队期间状态可能变化（候选过期、卫星衰减、
+  // multiPlan 与实际候选不一致等）。这里用当前数据再校验一次，不通过直接阻断，
+  // 返回结构化问题清单，让 solution 侧重新规划，而不是把不可执行的单派出去。
+  try {
+    const allCandRows = await pbAll("candidates", { filter: `task='${ref.rid}'` });
+    const passRows = allCandRows
+      .filter(c => (c.filtered ?? 0) === 0)
+      .map(c => ({ stripIdx: c.stripIdx, stripCoverage: c.stripCoverage, satName: c.satName,
+                   overpassTime: c.overpassTime, filtered: c.filtered }));
+    const preDispatchCheck = validatePlan({
+      task,
+      strips: totalStrips,
+      candidates: passRows,
+      satRows: (await pbAll("satellites", { filter: "decayed=0" })),
+      multiPlan: (() => { try { return JSON.parse(task.multiPlan ?? 'null'); } catch { return null; } })(),
+      constraintAudit: null,
+      stage: 'dispatch',
+    });
+    if (!preDispatchCheck.canProceed) {
+      try { await pbUpdate("tasks", ref.rid, { planCheck: JSON.stringify(preDispatchCheck) }); } catch {}
+      return res.status(422).json({
+        error: '工程侧校验未通过，拒绝派单',
+        planCheck: preDispatchCheck,
+        summary: preDispatchCheck.summary,
+        problems: preDispatchCheck.problems,
+        suggestions: preDispatchCheck.suggestions,
+        action: '请 solution 侧按 problems/suggestions 重新规划（重算候选或调整任务参数）后再次派单',
+      });
+    }
+  } catch (e) {
+    console.error('[dispatch] 派单前校验异常（不阻断）:', e.message);
+  }
   if (task.pendingConfirm) return res.status(400).json({ error: '任务待人工确认下发，请先在工作台点击「确认下发」' });
 
   // 工程侧加固：派单只接受工作台人工操作（X-Operator: human 头）。

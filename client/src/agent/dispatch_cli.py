@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 11  # v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 12  # v12: candidates 返回后醒目打印工程侧校验结论（FAIL 时列问题清单+建议，提示重规划）；v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -542,7 +542,29 @@ def main():
              "next": f"已进入待派单；建议执行 dispatch candidates {r['id']}"})
 
     elif cmd == "candidates" and arg:
-        out(api_req(f"/tasks/{int(arg)}/candidates", "POST"))
+        r = api_req(f"/tasks/{int(arg)}/candidates", "POST")
+        out(r)
+        # 工程侧校验结果单独醒目打出来：不通过就别继续，按问题清单重新规划
+        pc = r.get("planCheck") or {}
+        st = pc.get("status")
+        if st == "FAIL":
+            print("\n" + "=" * 60)
+            print("❌ 工程侧校验未通过，规划不可执行 —— 请重新规划后再继续")
+            print("=" * 60)
+            for p_ in (pc.get("problems") or [])[:10]:
+                print(f"  · {p_}")
+            sug = pc.get("suggestions") or []
+            if sug:
+                print("\n建议处理：")
+                for s_ in sug[:6]:
+                    print(f"  → {s_}")
+            print("\n不要直接派单；请按上述问题调整参数（时间窗/云量/分辨率/拆分）后重算候选。")
+        elif st == "WARN":
+            print(f"\n⚠️ 工程侧校验通过但有告警：{pc.get('summary') or ''}")
+            for p_ in (pc.get("problems") or [])[:5]:
+                print(f"  · {p_}")
+        elif st == "PASS":
+            print(f"\n✅ 工程侧校验通过：{pc.get('summary') or '规划可执行'}")
 
     elif cmd == "order-intake" and arg:
         # 一站式下单：JSON参数 → 服务端原子建单+确认+候选 → 回读断言
