@@ -1143,39 +1143,6 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
     .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
   if (ranking.length === 0) return res.status(400).json({ error: '无可用候选，请先执行候选计算' });
 
-  // ── 派单前工程侧复检（2026-11-17 用户要求）────────────────────────────
-  // 候选算完时已校验过一次，但排队期间状态可能变化（候选过期、卫星衰减、
-  // multiPlan 与实际候选不一致等）。这里用当前数据再校验一次，不通过直接阻断，
-  // 返回结构化问题清单，让 solution 侧重新规划，而不是把不可执行的单派出去。
-  try {
-    const allCandRows = await pbAll("candidates", { filter: `task='${ref.rid}'` });
-    const passRows = allCandRows
-      .filter(c => (c.filtered ?? 0) === 0)
-      .map(c => ({ stripIdx: c.stripIdx, stripCoverage: c.stripCoverage, satName: c.satName,
-                   overpassTime: c.overpassTime, filtered: c.filtered }));
-    const preDispatchCheck = validatePlan({
-      task,
-      strips: totalStrips,
-      candidates: passRows,
-      satRows: (await pbAll("satellites", { filter: "decayed=0" })),
-      multiPlan: (() => { try { return JSON.parse(task.multiPlan ?? 'null'); } catch { return null; } })(),
-      constraintAudit: null,
-      stage: 'dispatch',
-    });
-    if (!preDispatchCheck.canProceed) {
-      try { await pbUpdate("tasks", ref.rid, { planCheck: JSON.stringify(preDispatchCheck) }); } catch {}
-      return res.status(422).json({
-        error: '工程侧校验未通过，拒绝派单',
-        planCheck: preDispatchCheck,
-        summary: preDispatchCheck.summary,
-        problems: preDispatchCheck.problems,
-        suggestions: preDispatchCheck.suggestions,
-        action: '请 solution 侧按 problems/suggestions 重新规划（重算候选或调整任务参数）后再次派单',
-      });
-    }
-  } catch (e) {
-    console.error('[dispatch] 派单前校验异常（不阻断）:', e.message);
-  }
   if (task.pendingConfirm) return res.status(400).json({ error: '任务待人工确认下发，请先在工作台点击「确认下发」' });
 
   // 工程侧加固：派单只接受工作台人工操作（X-Operator: human 头）。
@@ -1250,6 +1217,40 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   }
   const totalStrips = (await pbAll("candidates", { filter: `task='${ref.rid}'`, fields: "stripIdx" }))
     .reduce((mx, c) => Math.max(mx, c.stripIdx ?? 1), 1);
+
+  // ── 派单前工程侧复检（2026-11-17 用户要求）────────────────────────────
+  // 必须放在 totalStrips 定义之后：校验要拿条带总数判断编号是否越界、
+  // 是否有覆盖缺口。此前误放在前面，totalStrips 还是 undefined，
+  // 导致 C2 覆盖完整性被跳过、校验形同虚设（实测 FAIL 任务照样派出去了）。
+  try {
+    const allCandRows = await pbAll("candidates", { filter: `task='${ref.rid}'` });
+    const passRows = allCandRows
+      .filter(c => (c.filtered ?? 0) === 0)
+      .map(c => ({ stripIdx: c.stripIdx, stripCoverage: c.stripCoverage, satName: c.satName,
+                   overpassTime: c.overpassTime, filtered: c.filtered }));
+    const preDispatchCheck = validatePlan({
+      task,
+      strips: totalStrips,
+      candidates: passRows,
+      satRows: (await pbAll("satellites", { filter: "decayed=0" })),
+      multiPlan: (() => { try { return JSON.parse(task.multiPlan ?? 'null'); } catch { return null; } })(),
+      constraintAudit: null,
+      stage: 'dispatch',
+    });
+    if (!preDispatchCheck.canProceed) {
+      try { await pbUpdate("tasks", ref.rid, { planCheck: JSON.stringify(preDispatchCheck) }); } catch {}
+      return res.status(422).json({
+        error: '工程侧校验未通过，拒绝派单',
+        planCheck: preDispatchCheck,
+        summary: preDispatchCheck.summary,
+        problems: preDispatchCheck.problems,
+        suggestions: preDispatchCheck.suggestions,
+        action: '请 solution 侧按 problems/suggestions 重新规划（重算候选或调整任务参数）后再次派单',
+      });
+    }
+  } catch (e) {
+    console.error('[dispatch] 派单前校验异常（不阻断）:', e.message);
+  }
   // 条带定义要带长度：冲突判定按「条带长 ÷ 地面速度」估算实际成像时长。
   // 注意：本路由作用域内没有 strips 变量（strips 只在 candidates 路由里），
   // 这里必须从任务 geom 重新规划一次，否则会抛 ReferenceError（v115 的派单 503 根因）。
