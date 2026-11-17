@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 13  # v13: api_req 超时 180s→可配置(默认900s)，大任务(23+条带)不再无谓超时；超时提示先回查避免重复建单；v12: candidates 返回后醒目打印工程侧校验结论（FAIL 时列问题清单+建议，提示重规划）；v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 14  # v14: 新增 area-status/progress（区域候选计算进度）与 recalc（按任务重算，只修失败项）；配合 order-intake 异步建单；v13: api_req 超时 180s→可配置(默认900s)，大任务(23+条带)不再无谓超时；超时提示先回查避免重复建单；v12: candidates 返回后醒目打印工程侧校验结论（FAIL 时列问题清单+建议，提示重规划）；v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -442,6 +442,8 @@ def main():
                 "order-intake <json>": "一站式下单（推荐）：传任务JSON，服务端原子完成建单+确认+候选+回读断言",
         "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
                 "sats [关键词]": "查卫星资源（返回真实总数与按类型统计；可按名称/类别/国家/运营商筛选）",
+                "area-status <区域名>": "查区域建单/候选计算进度（异步建单后必用，判断算完没有；别名 progress）",
+                "recalc <taskId> [JSON]": "只重算单个任务的候选（可选覆盖 maxCloud/resolution/windowEnd），不动其他条带",
                 "scope '<JSON>'": "覆盖范围判定（不写库）：输入区域多边形+观测类型+分辨率，返回「是否需拆单/拆几条/判定依据/最宽可用星」——判断拆不拆必须用它，不要自己查卫星清单算",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
@@ -583,6 +585,50 @@ def main():
                 print(f"  · {p_}")
         elif st == "PASS":
             print(f"\n✅ 工程侧校验通过：{pc.get('summary') or '规划可执行'}")
+
+    elif cmd in ("area-status", "progress") and arg:
+        # 区域建单/候选计算进度（异步建单后用它判断算完没有，别反复重跑）
+        r = api_req(f"/area-status?area={urllib.parse.quote(arg)}")
+        if not r.get("found"):
+            die(r.get("message") or f"没有找到区域「{arg}」")
+        print(f"区域：{r['area']}")
+        print(f"进度：{r['progress']['done']}/{r['total']}（{r['progress']['pct']}%）"
+              + ("  ✅ 已全部算完" if r.get("finished") else "  ⏳ 仍在计算"))
+        s_ = r.get("summary") or {}
+        print(f"结果：通过 {s_.get('pass',0)} ｜ 不通过 {s_.get('fail',0)} ｜ 告警 {s_.get('warn',0)}")
+        print(f"\n结论：{r.get('verdict')}")
+        fails = [c for c in (r.get("checks") or []) if c.get("status") == "FAIL"]
+        if fails:
+            print("\n不通过的条带：")
+            for c in fails[:10]:
+                prob = (c.get("problems") or [""])[0]
+                print(f"  条带{c['idx']}: {prob}")
+            if len(fails) > 10:
+                print(f"  …另有 {len(fails)-10} 条")
+            print("\n修复建议：先派可用的，再用 dispatch recalc <taskId> 单独重算失败项")
+
+    elif cmd == "recalc" and arg:
+        # 只重算单个任务候选（不动其他条带，避免整体推倒重来）
+        # 用法: dispatch recalc <taskId> ['{"maxCloud":0.5,"resolution":5,"windowEnd":"..."}']
+        parts = arg.split(None, 1)
+        tid = parts[0]
+        over = {}
+        if len(parts) > 1:
+            try:
+                over = json.loads(parts[1])
+            except Exception as e:
+                die(f"覆盖参数必须是合法 JSON：{e}")
+        r = api_req(f"/tasks/{tid}/recalc", method="POST", body=over)
+        pc = r.get("planCheck") or {}
+        print(f"任务 {r.get('taskNo')} 重算完成：条带 {r.get('strips')}，通过候选 {r.get('candidates')}，筛除 {r.get('filtered')}")
+        if r.get("note"): print(r["note"])
+        st = pc.get("status")
+        if st == "FAIL":
+            print("\n❌ 重算后仍未通过：")
+            for p_ in (pc.get("problems") or [])[:6]: print(f"  · {p_}")
+            for s_ in (pc.get("suggestions") or [])[:4]: print(f"  → {s_}")
+        else:
+            print(f"\n✅ {pc.get('summary') or '校验通过'}")
 
     elif cmd == "order-intake" and arg:
         # 一站式下单：JSON参数 → 服务端原子建单+确认+候选 → 回读断言

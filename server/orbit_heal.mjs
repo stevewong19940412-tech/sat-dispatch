@@ -187,6 +187,8 @@ const REQUIRED_FIELDS = {
     { name: 'multiPlan', type: 'text' },   // 分派方案 JSON，派单直接复用（避免重算分叉）
     // 工程侧校验结果 JSON（PASS/WARN/FAIL + 问题清单），候选算完写入、派单前复查
     { name: 'planCheck', type: 'text' },
+    // 候选计算进度（异步建单后写回，如 "37/102"），供 area-status 查询
+    { name: 'calcProgress', type: 'text' },
     // 区域拆单：记录所属父区域与条带序号，便于按区域汇总与前端分组展示
     { name: 'parentArea', type: 'text' },
     { name: 'stripIdx', type: 'number' },

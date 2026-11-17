@@ -107,6 +107,105 @@ dispatchApi.post("/tasks/:id/revoke", async (req, res) => {
 // 任务级人工确认：AI 建单默认 pendingConfirm=true（待人工确认下发），
 // 工作台点"确认下发"后才置 false 并可派发。手工录入默认 false。
 // ============ 一站式下单接口（工程侧保证落库，AI 只传参） ============
+// GET /area-status?area=<区域名>：区域建单与候选计算进度（2026-11-17 方案C 配套）
+// 异步建单后 AI 用它判断"算完没有、哪些通过、哪些失败"，避免反复重跑。
+dispatchApi.get("/area-status", async (req, res) => {
+  const area = String(req.query.area ?? '').trim();
+  if (!area) return res.status(400).json({ error: '需要 area 参数（区域名关键字）' });
+
+  let rows = [];
+  try { rows = await pbAll("tasks", { filter: `parentArea~'${area.replace(/'/g, "")}'` }); }
+  catch { rows = []; }
+  // 兼容：没有 parentArea 的（单任务路径/旧数据）按 taskName 匹配
+  if (!rows.length) {
+    const all = await pbAll("tasks", {});
+    rows = all.filter(t => String(t.taskName ?? '').includes(area) || String(t.parentArea ?? '').includes(area));
+  }
+  if (!rows.length) return res.json({ area, found: false, message: `没有找到区域「${area}」的任务` });
+
+  // 按条带号排序
+  rows.sort((a, b) => (a.stripIdx ?? 0) - (b.stripIdx ?? 0));
+
+  let pass = 0, fail = 0, pending = 0, other = 0;
+  const failedStrips = [];
+  const checks = [];
+  for (const t of rows) {
+    let pc = null;
+    if (typeof t.planCheck === 'string' && t.planCheck.trim()) {
+      try { pc = JSON.parse(t.planCheck); } catch { pc = null; }
+    } else if (t.planCheck && typeof t.planCheck === 'object') pc = t.planCheck;
+
+    const hasCand = Number(t.candidatesCount ?? 0) > 0 || t.calcProgress;
+    if (!pc) {
+      // 还没算完：有 calcProgress 说明在算，没有说明还没轮到
+      if (t.calcProgress) { pending++; checks.push({ idx: t.stripIdx, status: 'CALCULATING', progress: t.calcProgress }); }
+      else { pending++; checks.push({ idx: t.stripIdx, status: 'WAITING' }); }
+      continue;
+    }
+    if (pc.status === 'PASS') { pass++; checks.push({ idx: t.stripIdx, status: 'PASS' }); }
+    else if (pc.status === 'WARN') { pass++; checks.push({ idx: t.stripIdx, status: 'WARN', problems: pc.problems ?? [] }); }
+    else {
+      fail++;
+      failedStrips.push(t.stripIdx);
+      checks.push({ idx: t.stripIdx, status: 'FAIL', problems: (pc.problems ?? []).slice(0, 3),
+                    suggestions: (pc.suggestions ?? []).slice(0, 3) });
+    }
+  }
+
+  const total = rows.length;
+  const done = pass + fail;
+  res.json({
+    area, found: true, total,
+    progress: { done, pending, pct: total ? +((done / total) * 100).toFixed(1) : 0 },
+    summary: { pass, fail, warn: checks.filter(c => c.status === 'WARN').length },
+    finished: pending === 0,
+    failedStrips: failedStrips.slice(0, 50),
+    // 只说人话：算完了没、能不能派、哪些有问题
+    verdict: pending > 0
+      ? `候选计算中：${done}/${total} 已算完，还有 ${pending} 条待算。请稍后再查，**不要重新建单**。`
+      : fail === 0
+        ? `全部 ${total} 条带候选已算完，工程校验全部通过，可以派单。`
+        : `${total} 条带中 ${fail} 条校验不通过（条带 ${failedStrips.slice(0, 10).join(',')}${failedStrips.length > 10 ? '…' : ''}），`
+          + `另 ${pass} 条可用。可先派可用的，失败项用 dispatch recalc 单独重算。`,
+    checks: checks.slice(0, 120),
+  });
+});
+
+// POST /tasks/:id/recalc：按需重算单个任务的候选（2026-11-17 方案C 配套）
+// 用于"只修失败的条带"，不动已通过的，避免整体回滚重来。
+dispatchApi.post("/tasks/:id/recalc", async (req, res) => {
+  const ref = await pbResolveTask(req.params.id);
+  if (!ref) return res.status(404).json({ error: 'task not found' });
+  const t = await pbGet("tasks", ref.rid);
+  if (!t) return res.status(404).json({ error: 'task not found' });
+
+  // 允许临时覆盖参数（只影响本次重算，不改任务主记录）
+  const over = {};
+  if (req.body?.maxCloud != null) over.maxCloud = Number(req.body.maxCloud);
+  if (req.body?.resolution != null) over.resolution = Number(req.body.resolution);
+  if (req.body?.windowEnd) over.windowEnd = req.body.windowEnd;
+  if (Object.keys(over).length) {
+    try { await pbUpdate("tasks", ref.rid, over); } catch (e) {
+      return res.status(500).json({ error: '更新任务参数失败', detail: e.message });
+    }
+  }
+
+  try {
+    const r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 8800}/api/dispatch/tasks/${ref.oldId ?? ref.rid}/candidates`,
+      { method: "POST", headers: { "Content-Type": "application/json", "X-Operator": "system" } });
+    const d = await r.json().catch(() => ({}));
+    return res.json({
+      ok: r.ok, taskNo: t.taskNo, taskId: ref.oldId ?? ref.rid,
+      appliedOverrides: over,
+      strips: d.strips, candidates: d.candidates, filtered: d.filtered,
+      planCheck: d.planCheck,
+      note: Object.keys(over).length ? `已按覆盖参数重算：${JSON.stringify(over)}` : '已按原参数重算',
+    });
+  } catch (e) {
+    return res.status(500).json({ error: '重算失败', detail: e.message });
+  }
+});
+
 // POST /scope-judge：覆盖范围判定（2026-11-16 新增）
 // 目的：AI 判断「一个区域要不要拆单」时，不必自己查卫星清单再算——
 // 一条命令直接返回判定结论、依据数值、可用卫星统计，以及拆的话会拆几条。
@@ -259,19 +358,41 @@ dispatchApi.post("/order-intake", async (req, res) => {
       if (!rw) continue;
       created.push({ taskId: rw.oldId ?? rw.id, taskNo: rw.taskNo, stripIdx: st.idx, taskName: tk.taskName, recordId: rw.id });
     }
-    // 逐条算候选（串行，避免并发压垮单进程）
-    for (const c of created) {
-      try {
-        await fetch(`http://127.0.0.1:${process.env.PORT ?? 8800}/api/dispatch/tasks/${c.taskId}/candidates`,
-          { method: "POST", headers: { "Content-Type": "application/json", "X-Operator": "system" } });
-      } catch (e) { console.error(`[order-intake] 条带${c.stripIdx}候选计算失败:`, e.message); }
-    }
+    // ── 候选计算转后台异步（2026-11-17 方案C）─────────────────────────
+    // 背景：候选计算是重操作（15 日窗单条约 52s，102 条带串行约 88 分钟）。
+    // 旧实现同步跑完才返回，导致请求必然超时；超时后任务其实已落库，
+    // 调用方不知情就重跑，产生大量重复任务（曾出现 102 条带→408 个任务）。
+    // 现在：建单落库后立即返回，候选在后台逐条算，算完一条更新一条的 planCheck。
+    // 规划结果不受影响——条带切分/编号在返回前就已完成，候选只是"能不能拍"的补充信息。
+    const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setImmediate(async () => {
+      let done = 0, failed = 0;
+      for (const c of created) {
+        try {
+          const r = await fetch(`http://127.0.0.1:${process.env.PORT ?? 8800}/api/dispatch/tasks/${c.taskId}/candidates`,
+            { method: "POST", headers: { "Content-Type": "application/json", "X-Operator": "system" } });
+          if (r.ok) done++; else failed++;
+        } catch (e) {
+          failed++;
+          console.error(`[order-intake] 条带${c.stripIdx}候选计算失败:`, e.message);
+        }
+        // 进度写回任务，供 AI 查询
+        try {
+          await pbUpdate("tasks", c.recordId, { calcProgress: `${done + failed}/${created.length}` });
+        } catch {}
+      }
+      console.log(`[order-intake] ${jobId} 候选计算完成: 成功 ${done} 失败 ${failed} / 共 ${created.length}`);
+    });
     return res.json({
       ok: true, split: true, stripCount: stripPlan.length,
       parentArea: baseName,
       scopeJudge,
+      candidates: 'pending',
+      jobId,
       tasks: created.map(c => ({ taskId: c.taskId, taskNo: c.taskNo, stripIdx: c.stripIdx, taskName: c.taskName })),
-      note: `面目标已按 ${stripPlan.length} 条带拆成 ${created.length} 个独立任务（每条带一单，可分别派单/直控）`,
+      note: `已按 ${stripPlan.length} 条带拆成 ${created.length} 个独立任务（每条带一单）。`
+        + `候选计算在后台进行，用 dispatch area-status "<区域名>" 查进度；`
+        + `⚠️ 不要重复调用 order-intake，任务已经建好了。`,
     });
   }
 
