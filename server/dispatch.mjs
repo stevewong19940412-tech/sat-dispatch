@@ -1043,10 +1043,21 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       .filter(op => op.table === 'candidates')
       .map(op => op.data)
       .filter(d => (d.filtered ?? 0) === 0);
+    // 注意：候选重算后，**旧的 multiPlan 已失效**（它对应的是上一轮候选）。
+    // 用它做 C5 校验会产生大量假 FAIL（实测任务560：旧方案 2 条分配，
+    // 与新候选的卫星名对不上，但覆盖其实 2/2 正常）。
+    // 正确做法：候选阶段只校验本轮新产出的 multiPlan（由下面的分派计算给出），
+    // 旧方案不参与校验；派单阶段才用任务里持久化的方案。
+    const freshMultiPlan = (() => {
+      try {
+        const mp = coveragePlan?.multiSatellite?.assignments;
+        return Array.isArray(mp) ? mp : null;
+      } catch { return null; }
+    })();
     planCheck = validatePlan({
       task, strips: strips.length, candidates: passRows,
       satRows: (await pbAll("satellites", { filter: "decayed=0" })),
-      multiPlan: (() => { try { return JSON.parse(task.multiPlan ?? 'null'); } catch { return null; } })(),
+      multiPlan: freshMultiPlan,
       constraintAudit: coveragePlan?.constraintAudit ?? null,
       stage: 'candidates',
     });
