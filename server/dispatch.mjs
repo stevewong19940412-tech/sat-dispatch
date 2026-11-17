@@ -445,6 +445,11 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
   catch (e) { if (e.status === 404) return res.status(404).json({ error: 'task not found' }); throw e; }
   t.id = ref.oldId ?? ref.rid;
   t.geom = JSON.parse(t.geom ?? "{}");
+  // planCheck 落库是 JSON 字符串，这里解析成对象再返回——
+  // 与 candidates 接口返回的对象格式保持一致，调用方不必区分两种形态。
+  if (typeof t.planCheck === 'string' && t.planCheck) {
+    try { t.planCheck = JSON.parse(t.planCheck); } catch { t.planCheck = null; }
+  }
   // 任务详情带区域规划信息（2026-11-16 增强）
   // 用户要求：详情里必须能看到「四个顶点坐标是什么、条带怎么表达」。
   // 旧实现只给 stripCount 等概要，且幅宽写死 12km（与判定口径不符）。
@@ -1039,10 +1044,12 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   // 而不是等人工在工作台发现「派不了 / 拍不到 / 编号对不上」。
   let planCheck = null;
   try {
-    const passRows = candOps
+    // 传全量候选（含被筛行）：校验里的 C2 要统计"为什么没候选"，
+    // 只传通过行会丢掉 filterReason，AI 就不知道是云量、分辨率还是覆盖率挡的。
+    const allCandData = candOps
       .filter(op => op.table === 'candidates')
       .map(op => op.data)
-      .filter(d => (d.filtered ?? 0) === 0);
+      .map(d => ({ ...d, filterReason: d.filterReason ?? '' }));
     // 注意：候选重算后，**旧的 multiPlan 已失效**（它对应的是上一轮候选）。
     // 用它做 C5 校验会产生大量假 FAIL（实测任务560：旧方案 2 条分配，
     // 与新候选的卫星名对不上，但覆盖其实 2/2 正常）。
@@ -1055,7 +1062,7 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
       } catch { return null; }
     })();
     planCheck = validatePlan({
-      task, strips: strips.length, candidates: passRows,
+      task, strips: strips.length, candidates: allCandData,
       satRows: (await pbAll("satellites", { filter: "decayed=0" })),
       multiPlan: freshMultiPlan,
       constraintAudit: coveragePlan?.constraintAudit ?? null,
@@ -1235,10 +1242,11 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   // 导致 C2 覆盖完整性被跳过、校验形同虚设（实测 FAIL 任务照样派出去了）。
   try {
     const allCandRows = await pbAll("candidates", { filter: `task='${ref.rid}'` });
-    const passRows = allCandRows
-      .filter(c => (c.filtered ?? 0) === 0)
-      .map(c => ({ stripIdx: c.stripIdx, stripCoverage: c.stripCoverage, satName: c.satName,
-                   overpassTime: c.overpassTime, filtered: c.filtered }));
+    // 全量传入（含被筛行），让校验能统计筛除原因
+    const passRows = allCandRows.map(c => ({
+      stripIdx: c.stripIdx, stripCoverage: c.stripCoverage, satName: c.satName,
+      overpassTime: c.overpassTime, filtered: c.filtered, filterReason: c.filterReason ?? '',
+    }));
     const preDispatchCheck = validatePlan({
       task,
       strips: totalStrips,

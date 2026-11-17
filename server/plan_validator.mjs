@@ -74,14 +74,32 @@ export function validatePlan(ctx) {
       const covered = new Set(passing.map(c => c.stripIdx));
       const missing = [];
       for (let i = 1; i <= stripCount; i++) if (!covered.has(i)) missing.push(i);
+
+      // 统计被筛原因：让 AI 知道"为什么没候选"，而不是只看到"无候选"
+      const reasonCount = new Map();
+      for (const c of candidates) {
+        if ((c.filtered ?? 0) === 0) continue;
+        const r = String(c.filterReason ?? '').split('；')[0].split('：')[0].trim();
+        if (r) reasonCount.set(r, (reasonCount.get(r) ?? 0) + 1);
+      }
+      const topReasons = [...reasonCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+      const reasonText = topReasons.length
+        ? `主要筛除原因：${topReasons.map(([k, v]) => `${k}(${v}条)`).join('、')}`
+        : '';
+
       if (missing.length === stripCount) {
         add('C2', '覆盖完整性', 'FAIL',
-          `全部 ${stripCount} 条带均无可用候选`,
-          [`${stripCount} 条带全部无可用过顶，该任务在当前参数下无法完成`],
-          ['扩大时间窗', '放宽云量上限', '降低分辨率要求', '改用 SAR 或更宽幅星座']);
+          `全部 ${stripCount} 条带均无可用候选${reasonText ? '｜' + reasonText : ''}`,
+          [`${stripCount} 条带全部无可用过顶，该任务在当前参数下无法完成`
+            + (reasonText ? `（${reasonText}）` : '')],
+          reasonCount.has('云量超限') ? ['放宽云量上限（当前是主要瓶颈）', '扩大时间窗', '降低分辨率要求']
+            : reasonCount.has('分辨率不满足') ? ['降低分辨率要求（当前是主要瓶颈）', '扩大时间窗']
+            : reasonCount.has('条带不可覆盖') ? ['改用更宽幅/更多卫星的组合', '扩大时间窗以获取更多过顶机会']
+            : ['扩大时间窗', '放宽云量上限', '降低分辨率要求', '改用 SAR 或更宽幅星座']);
       } else if (missing.length) {
         add('C2', '覆盖完整性', 'FAIL',
-          `${stripCount} 条带中 ${missing.length} 条无可用候选（缺 ${missing.slice(0, 10).join(',')}${missing.length > 10 ? '…' : ''}）`,
+          `${stripCount} 条带中 ${missing.length} 条无可用候选（缺 ${missing.slice(0, 10).join(',')}${missing.length > 10 ? '…' : ''}）`
+            + (reasonText ? '｜' + reasonText : ''),
           missing.slice(0, 20).map(i => `条带 ${i} 无任何可用候选，拍摄后存在覆盖缺口`),
           ['扩大时间窗以覆盖更多过顶', '放宽云量上限', '如可接受缺口，拆分任务只对已有候选的条带下单']);
       } else {
