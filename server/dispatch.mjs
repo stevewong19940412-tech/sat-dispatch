@@ -690,29 +690,22 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   // 而实际可用的 GF-1（60km 幅宽）一颗就够 1 条带。
   // 新做法：取「满足任务分辨率要求的卫星里最大幅宽」，作为切分幅宽，
   // 上限不超过区域短边的 1.2 倍（避免幅宽远大于目标导致过度覆盖）。
+  // ── 条带幅宽：全系统唯一口径（2026-11-17 统一）──────────────────────────
+  // 历史问题：候选计算用「最小幅宽(12km)」→ 北京全域 38 条带；
+  //           任务详情用「75 分位幅宽(45km)」→ 同样区域 10 条带。
+  //   两套口径算出两套条带号，候选 stripIdx 到 38、详情只有 10，
+  //   派单时选中 stripIdx=11 → 订单显示"条带11/38"，用户完全无法理解。
+  // 现在统一调用 area_judge.deriveUsableSwath()，与 scope 判定、
+  //   任务详情、建单拆条带共用同一个数值，杜绝再次分叉。
   const taskRes = Number(task.resolution) || 2;
   let swathForPlan = 12;
   try {
-    const caps = scope.map(s => getCapability(s)).filter(c => c.resolution <= taskRes * 1.2);
-    const maxSwath = caps.length ? Math.max(...caps.map(c => c.swathKm)) : 12;
-    const geomObj = JSON.parse(task.geom ?? "{}");
-    if (task.geomType !== 'point' && Array.isArray(geomObj.coords)) {
-      const lats = geomObj.coords.map(c => c[0]), lons = geomObj.coords.map(c => c[1]);
-      const spanKm = Math.min(
-        Math.abs(Math.max(...lats) - Math.min(...lats)) * 111,
-        Math.abs(Math.max(...lons) - Math.min(...lons)) * 111 * Math.cos(geomObj.coords[0][0] * Math.PI / 180)
-      );
-      // 条带宽度口径（2026-11-16 定稿）：
-      //   · 宽度 = 满足任务分辨率的卫星中「**最小**幅宽」，而不是最大幅宽。
-      //   理由：条带是给"任意一颗能接单的星"用的公共划分。若按最大幅宽（如 60km）切，
-      //   则窄幅星（12km）根本无法覆盖一个 60km 宽带，只能拍中段；
-      //   按最小幅宽切，宽带星可以一次覆盖多条带（它的幅宽是条带的整数倍），
-      //   窄幅星也能正好覆盖一条带——这是"向下兼容"的安全划分。
-      //   · 长度上限 100km 由规划器负责分段。
-      const minSwath = caps.length ? Math.min(...caps.map(c => c.swathKm)) : 12;
-      swathForPlan = Math.max(12, Math.min(minSwath, Math.max(12, spanKm)));
-    }
-  } catch {}
+    const allSatRows = await pbAll("satellites", { filter: "decayed=0" });
+    const sw = deriveUsableSwath(allSatRows, task.obsType, taskRes);
+    if (sw?.swathKm) swathForPlan = sw.swathKm;
+  } catch (e) {
+    console.error('[candidates] 幅宽推导失败，回退 12km:', e.message);
+  }
   const strips = normalizeTaskStrips(task, swathForPlan);
   const areaPlan = task.geomType === 'point' ? null : planTaskArea(task, swathForPlan);
 
@@ -1204,7 +1197,14 @@ dispatchApi.post("/tasks/:id/dispatch", async (req, res) => {
   try {
     const geomObj = JSON.parse(task.geom ?? "{}");
     if (task.geomType !== 'point' && Array.isArray(geomObj.coords)) {
-      const planned = normalizeTaskStrips(task, 12);
+      // 幅宽必须与候选计算/任务详情一致，否则条带号与长度对不上
+      let swathKm = 12;
+      try {
+        const satRows = await pbAll("satellites", { filter: "decayed=0" });
+        const sw = deriveUsableSwath(satRows, task.obsType, task.resolution);
+        if (sw?.swathKm) swathKm = sw.swathKm;
+      } catch {}
+      const planned = normalizeTaskStrips(task, swathKm);
       for (const st of planned) stripLenByIdx.set(st.idx, st.lengthKm ?? 60);
     }
   } catch (e) {
@@ -1874,7 +1874,16 @@ dispatchApi.post("/plans/:id/generate", async (req, res) => {
   if (!plan) return res.status(404).json({ error: 'plan not found' });
   const sat = (await pbAll("satellites", { filter: `noradId=${plan.satNoradId}` }))[0];
   const task = plan.task ? await pbGet("tasks", plan.task) : null;
-  const strips = normalizeTaskStrips(task, 12);
+  // 幅宽与全系统统一口径（原写死 12km 会与候选/详情不一致）
+  let gSwath = 12;
+  if (task) {
+    try {
+      const satRows = await pbAll("satellites", { filter: "decayed=0" });
+      const sw = deriveUsableSwath(satRows, task.obsType, task.resolution);
+      if (sw?.swathKm) gSwath = sw.swathKm;
+    } catch {}
+  }
+  const strips = normalizeTaskStrips(task, gSwath);
   const planSlew = plan.slewDeg ?? 15;
   const { commands, timeline } = generateCommands({ ...plan, slewDeg: planSlew }, sat, strips[0], plan.windowStart, plan.windowEnd);
   // 测控弧段：真实站星几何计算（站-星仰角≥5°），选成像开始前最后一个可用弧段作为上注弧段
