@@ -447,8 +447,12 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
   t.geom = JSON.parse(t.geom ?? "{}");
   // planCheck 落库是 JSON 字符串，这里解析成对象再返回——
   // 与 candidates 接口返回的对象格式保持一致，调用方不必区分两种形态。
-  if (typeof t.planCheck === 'string' && t.planCheck) {
-    try { t.planCheck = JSON.parse(t.planCheck); } catch { t.planCheck = null; }
+  // 统一成对象或 null：空串/无效 JSON 都归一为 null，
+  // 避免调用方拿到 '' 还要判断类型（实测任务561 返回空串导致前端解析失败）
+  if (typeof t.planCheck === 'string') {
+    const raw = t.planCheck.trim();
+    if (!raw) t.planCheck = null;
+    else { try { t.planCheck = JSON.parse(raw); } catch { t.planCheck = null; } }
   }
   // 任务详情带区域规划信息（2026-11-16 增强）
   // 用户要求：详情里必须能看到「四个顶点坐标是什么、条带怎么表达」。
