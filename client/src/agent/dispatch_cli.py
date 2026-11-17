@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 12  # v12: candidates 返回后醒目打印工程侧校验结论（FAIL 时列问题清单+建议，提示重规划）；v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 13  # v13: api_req 超时 180s→可配置(默认900s)，大任务(23+条带)不再无谓超时；超时提示先回查避免重复建单；v12: candidates 返回后醒目打印工程侧校验结论（FAIL 时列问题清单+建议，提示重规划）；v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -65,13 +65,20 @@ def _headers():
         h["Authorization"] = f"Bearer {token}"
     return h
 
+# 建单/候选是重操作：order-intake 会串行把所有条带的候选算完才返回，
+# 23 条带实测要 5~10 分钟，原写死 180s 必然超时（超时后任务其实已落库，
+# 导致调用方重跑、产生重复任务）。
+# 改为可配置：DISPATCH_TIMEOUT 环境变量（秒），默认 900s。
+API_TIMEOUT = int(os.environ.get("DISPATCH_TIMEOUT", "900"))
+
+
 def api_req(path, method="GET", body=None):
     check_version()
     req = urllib.request.Request(API + path, method=method,
         headers=_headers(),
         data=json.dumps(body).encode() if body else None)
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         # v11 修复：旧实现 `except Exception` 只输出 str(e)="HTTP Error 400: Bad Request"，
@@ -99,6 +106,17 @@ def api_req(path, method="GET", body=None):
         except Exception:
             pass
         die(f"HTTP {e.code} {method} {path}\n{hint}\n原始响应: {raw[:600]}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # 超时不等于失败：order-intake 是先建单再算候选，超时那一刻任务通常已落库。
+        # 明确提示调用方先回查，避免重跑产生重复任务。
+        is_timeout = "timed out" in str(e).lower() or isinstance(e, TimeoutError)
+        if is_timeout:
+            die(f"请求超时（{API_TIMEOUT}s）{method} {path}\n"
+                f"⚠️ 超时不代表失败：建单类操作会在算完所有条带候选后才返回，\n"
+                f"   任务可能已落库。请先执行 `dispatch tasks` 回查，\n"
+                f"   确认没有新建成的任务再重试，避免产生重复单。\n"
+                f"   如需更长时间：export DISPATCH_TIMEOUT=1800")
+        die(f"网络异常 {method} {path}: {e}")
 
 def _preflight_payload(body):
     """建单前本地校验必填项，缺什么一次说清（不等服务端 400）。
