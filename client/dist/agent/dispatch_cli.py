@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, urllib.parse, urllib.request
 
-CLI_VERSION = 9  # v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
+CLI_VERSION = 14  # v14: 新增 area-status/progress（区域候选计算进度）与 recalc（按任务重算，只修失败项）；配合 order-intake 异步建单；v13: api_req 超时 180s→可配置(默认900s)，大任务(23+条带)不再无谓超时；超时提示先回查避免重复建单；v12: candidates 返回后醒目打印工程侧校验结论（FAIL 时列问题清单+建议，提示重规划）；v11: api_req 不再吞 HTTP 错误体（原只输出 'HTTP Error 400' 导致调用方靠猜、反复试错）；order-intake 建单前本地预检必填项/geom 形状，缺项一次列清并给正确示例；v10: 新增 scope 覆盖判定命令（一条命令回答「要不要拆单」）；sats 返回真实总数与类型统计（原只回20颗致误判）；v9: create 缺字段不再崩溃（recommend 失败可容错）；面目标不再被硬改成点目标，支持 geomType=polygon + geom.coords；v8: q() 双通道——优先走应用侧 /dispatch/_pbq 只读代理（线上 PB 仅容器内可见，直连 127.0.0.1:8091 会 refused）；DISPATCH_PB_URL 显式指定时仍可直连（v7=PB直连翻译 v6=批量建单 v4=补齐sats/companies v3=weather/recommend/delete v2=自动地址探测 v1=写死地址）
 CLI_SOURCE_URL_KEY = '/agent/dispatch_cli.py'
 
 # CLI 运行在智能体沙盒，通过应用公网地址访问业务 API（Blade token 过网关）
@@ -65,16 +65,80 @@ def _headers():
         h["Authorization"] = f"Bearer {token}"
     return h
 
+# 建单/候选是重操作：order-intake 会串行把所有条带的候选算完才返回，
+# 23 条带实测要 5~10 分钟，原写死 180s 必然超时（超时后任务其实已落库，
+# 导致调用方重跑、产生重复任务）。
+# 改为可配置：DISPATCH_TIMEOUT 环境变量（秒），默认 900s。
+API_TIMEOUT = int(os.environ.get("DISPATCH_TIMEOUT", "900"))
+
+
 def api_req(path, method="GET", body=None):
     check_version()
     req = urllib.request.Request(API + path, method=method,
         headers=_headers(),
         data=json.dumps(body).encode() if body else None)
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as r:
             return json.loads(r.read().decode())
-    except Exception as e:
-        die(f"API 调用失败: {e}")
+    except urllib.error.HTTPError as e:
+        # v11 修复：旧实现 `except Exception` 只输出 str(e)="HTTP Error 400: Bad Request"，
+        # 服务端返回的 {"error":"缺少必填参数 geomType"} 被丢弃 → 调用方只能靠猜、
+        # 反复试错（嘉手纳建单连报 400 就是这个原因）。这里把响应体完整打出来，
+        # 并在可解析时把 error/detail 提到首行，便于一眼定位。
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        hint = ""
+        try:
+            j = json.loads(raw)
+            msg = j.get("error") or j.get("message") or ""
+            det = j.get("detail") or ""
+            sug = j.get("suggestion") or ""
+            if msg:
+                hint = f"错误: {msg}"
+                if det: hint += f" | 详情: {det}"
+                if sug: hint += f" | 建议: {sug}"
+            # 结构化断言失败时把缺失字段直接列出来
+            if isinstance(j.get("missing"), list) and j["missing"]:
+                hint += f" | 缺失字段: {', '.join(map(str, j['missing']))}"
+        except Exception:
+            pass
+        die(f"HTTP {e.code} {method} {path}\n{hint}\n原始响应: {raw[:600]}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # 超时不等于失败：order-intake 是先建单再算候选，超时那一刻任务通常已落库。
+        # 明确提示调用方先回查，避免重跑产生重复任务。
+        is_timeout = "timed out" in str(e).lower() or isinstance(e, TimeoutError)
+        if is_timeout:
+            die(f"请求超时（{API_TIMEOUT}s）{method} {path}\n"
+                f"⚠️ 超时不代表失败：建单类操作会在算完所有条带候选后才返回，\n"
+                f"   任务可能已落库。请先执行 `dispatch tasks` 回查，\n"
+                f"   确认没有新建成的任务再重试，避免产生重复单。\n"
+                f"   如需更长时间：export DISPATCH_TIMEOUT=1800")
+        die(f"网络异常 {method} {path}: {e}")
+
+def _preflight_payload(body):
+    """建单前本地校验必填项，缺什么一次说清（不等服务端 400）。
+    与 /order-intake 的 need 列表保持一致；geom 结构另做形状检查。"""
+    need = ["taskName", "geomType", "geom", "obsType", "resolution", "windowStart", "windowEnd"]
+    missing = [k for k in need if body.get(k) is None]
+    probs = []
+    if missing:
+        probs.append(f"缺少必填参数: {', '.join(missing)}")
+    gt = body.get("geomType")
+    gm = body.get("geom")
+    if gt and gm is not None:
+        if gt == "point":
+            if not isinstance(gm, dict) or gm.get("lat") is None or gm.get("lon") is None:
+                probs.append('geomType=point 时 geom 必须是 {"lat":纬度,"lon":经度}')
+        else:
+            cs = gm.get("coords") if isinstance(gm, dict) else None
+            if not isinstance(cs, list) or len(cs) < 3:
+                probs.append('面目标 geom 必须是 {"coords":[[lat,lon],[lat,lon],...]}（≥3 顶点）')
+    if gt and gt not in ("point", "polygon", "area"):
+        probs.append(f"geomType 只能是 point/polygon/area，当前 {gt}")
+    return probs
 
 def q(sql, args=()):
     # 便捷查询：SQL 已随 PocketBase 迁移弃用（POST /_sql 移除）。
@@ -377,7 +441,10 @@ def main():
                 "candidates <taskId>": "候选卫星计算（可见窗/约束/云量/排序，耗时较长）",
                 "order-intake <json>": "一站式下单（推荐）：传任务JSON，服务端原子完成建单+确认+候选+回读断言",
         "dispatch <taskId>": "【工程侧禁用】派单由用户在工作台人工操作",
-                "sats [关键词]": "查卫星资源（按名称/类别/国家/运营商模糊匹配，如 sats 高分）",
+                "sats [关键词]": "查卫星资源（返回真实总数与按类型统计；可按名称/类别/国家/运营商筛选）",
+                "area-status <区域名>": "查区域建单/候选计算进度（异步建单后必用，判断算完没有；别名 progress）",
+                "recalc <taskId> [JSON]": "只重算单个任务的候选（可选覆盖 maxCloud/resolution/windowEnd），不动其他条带",
+                "scope '<JSON>'": "覆盖范围判定（不写库）：输入区域多边形+观测类型+分辨率，返回「是否需拆单/拆几条/判定依据/最宽可用星」——判断拆不拆必须用它，不要自己查卫星清单算",
                 "companies": "运营公司（容量/履约率）",
                 "orders": "订单列表",
         "delete <taskId>": "删除任务单（仅待派单/挂任务池状态；级联清理候选排序订单）",
@@ -390,20 +457,28 @@ def main():
         })
 
     elif cmd == "sats":
+        # 2026-11-16 修正：旧实现无关键词时只回 rows[:20]，且 LIMIT 50，
+        # 导致 AI 为查「1m 光学可用幅宽」反复翻页、误判"库里只有 20 颗旧卫星"。
+        # 现改为：返回真实总数 + 按观测类型/分辨率筛选，默认不截断到 20。
         kw = f"%{arg}%" if arg else None
+        base = """SELECT noradId, name, country, operator, category, subCategory, payloadType,
+                         resolution, altitude, inclination, period
+                  FROM satellites WHERE decayed=0"""
         if kw:
-            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
-                         resolution, altitude, inclination, period, decayed
-                         FROM satellites WHERE (name LIKE ? OR country LIKE ? OR operator LIKE ?
-                         OR category LIKE ? OR payloadType LIKE ?) AND decayed=0
-                         ORDER BY noradId LIMIT 50""",
-                     (kw, kw, kw, kw, kw))
+            rows = q(base + """ AND (name LIKE ? OR country LIKE ? OR operator LIKE ?
+                         OR category LIKE ? OR subCategory LIKE ? OR payloadType LIKE ?)
+                         ORDER BY noradId LIMIT 500""",
+                     (kw, kw, kw, kw, kw, kw))
         else:
-            rows = q("""SELECT noradId, name, country, operator, category, subCategory, payloadType,
-                         resolution, altitude, inclination, period, decayed
-                         FROM satellites WHERE decayed=0 ORDER BY noradId LIMIT 50""")
-        out({"总数": len(rows), "卫星": rows if arg else rows[:20],
-             "提示": "传关键词缩小范围，如 dispatch sats 高分 / sats sar"})
+            rows = q(base + " ORDER BY noradId LIMIT 500")
+        # 按观测类型汇总（让 AI 一眼看出光学/SAR 各有多少颗）
+        by_type = {}
+        for r in rows:
+            k = str(r.get("subCategory") or "unknown")
+            by_type[k] = by_type.get(k, 0) + 1
+        out({"总数": len(rows), "按类型统计": by_type,
+             "卫星": rows if arg else rows[:50],
+             "提示": "传关键词筛选，如 dispatch sats optical / sats sar / sats 吉林"})
 
     elif cmd == "tasks":
         out(q("SELECT id, taskNo, taskName, targetName, obsType, resolution, priority, status, windowStart, windowEnd FROM tasks ORDER BY id DESC LIMIT 30"))
@@ -487,7 +562,76 @@ def main():
              "next": f"已进入待派单；建议执行 dispatch candidates {r['id']}"})
 
     elif cmd == "candidates" and arg:
-        out(api_req(f"/tasks/{int(arg)}/candidates", "POST"))
+        r = api_req(f"/tasks/{int(arg)}/candidates", "POST")
+        out(r)
+        # 工程侧校验结果单独醒目打出来：不通过就别继续，按问题清单重新规划
+        pc = r.get("planCheck") or {}
+        st = pc.get("status")
+        if st == "FAIL":
+            print("\n" + "=" * 60)
+            print("❌ 工程侧校验未通过，规划不可执行 —— 请重新规划后再继续")
+            print("=" * 60)
+            for p_ in (pc.get("problems") or [])[:10]:
+                print(f"  · {p_}")
+            sug = pc.get("suggestions") or []
+            if sug:
+                print("\n建议处理：")
+                for s_ in sug[:6]:
+                    print(f"  → {s_}")
+            print("\n不要直接派单；请按上述问题调整参数（时间窗/云量/分辨率/拆分）后重算候选。")
+        elif st == "WARN":
+            print(f"\n⚠️ 工程侧校验通过但有告警：{pc.get('summary') or ''}")
+            for p_ in (pc.get("problems") or [])[:5]:
+                print(f"  · {p_}")
+        elif st == "PASS":
+            print(f"\n✅ 工程侧校验通过：{pc.get('summary') or '规划可执行'}")
+
+    elif cmd in ("area-status", "progress") and arg:
+        # 区域建单/候选计算进度（异步建单后用它判断算完没有，别反复重跑）
+        r = api_req(f"/area-status?area={urllib.parse.quote(arg)}")
+        if not r.get("found"):
+            die(r.get("message") or f"没有找到区域「{arg}」")
+        print(f"区域：{r['area']}")
+        print(f"进度：{r['progress']['done']}/{r['total']}（{r['progress']['pct']}%）"
+              + ("  ✅ 已全部算完" if r.get("finished") else "  ⏳ 仍在计算"))
+        s_ = r.get("summary") or {}
+        print(f"结果：通过 {s_.get('pass',0)} ｜ 不通过 {s_.get('fail',0)} ｜ 告警 {s_.get('warn',0)}")
+        print(f"\n结论：{r.get('verdict')}")
+        fails = [c for c in (r.get("checks") or []) if c.get("status") == "FAIL"]
+        if fails:
+            print("\n不通过的条带：")
+            for c in fails[:10]:
+                prob = (c.get("problems") or [""])[0]
+                print(f"  条带{c['idx']}: {prob}")
+            if len(fails) > 10:
+                print(f"  …另有 {len(fails)-10} 条")
+            print("\n修复建议：先派可用的，再用 dispatch recalc <taskId> 单独重算失败项")
+
+    elif cmd == "recalc" and arg:
+        # 只重算单个任务候选（不动其他条带，避免整体推倒重来）
+        # 用法: dispatch recalc <taskId> ['{"maxCloud":0.5,"resolution":5,"windowEnd":"..."}']
+        # 注意：CLI 顶层只把 sys.argv[2] 给 arg，第二个参数要自己从 argv 取，
+        # 否则 JSON 覆盖参数会被静默丢弃（实测"已按原参数重算"就是这么来的）。
+        tid = arg
+        over = {}
+        extra = sys.argv[3:] if len(sys.argv) > 3 else []
+        if extra:
+            raw = " ".join(extra)
+            try:
+                over = json.loads(raw)
+            except Exception as e:
+                die(f"覆盖参数必须是合法 JSON：{e}\n传入的是: {raw}")
+        r = api_req(f"/tasks/{tid}/recalc", method="POST", body=over)
+        pc = r.get("planCheck") or {}
+        print(f"任务 {r.get('taskNo')} 重算完成：条带 {r.get('strips')}，通过候选 {r.get('candidates')}，筛除 {r.get('filtered')}")
+        if r.get("note"): print(r["note"])
+        st = pc.get("status")
+        if st == "FAIL":
+            print("\n❌ 重算后仍未通过：")
+            for p_ in (pc.get("problems") or [])[:6]: print(f"  · {p_}")
+            for s_ in (pc.get("suggestions") or [])[:4]: print(f"  → {s_}")
+        else:
+            print(f"\n✅ {pc.get('summary') or '校验通过'}")
 
     elif cmd == "order-intake" and arg:
         # 一站式下单：JSON参数 → 服务端原子建单+确认+候选 → 回读断言
@@ -497,6 +641,16 @@ def main():
             body = _json.loads(arg)
         except Exception as e:
             die(f"参数必须是合法 JSON：{e}")
+        # 本地预检：缺项/geom 形状问题一次说清，不必等服务器 400 再猜
+        probs = _preflight_payload(body)
+        if probs:
+            die("建单参数不完整，请一次补齐后重试：\n  - " + "\n  - ".join(probs)
+                + "\n\n正确示例：\n  dispatch order-intake '" + _json.dumps({
+                    "taskName": "示例任务", "geomType": "point",
+                    "geom": {"lat": 26.35, "lon": 127.77},
+                    "obsType": "optical", "resolution": 2,
+                    "windowStart": "2026-11-17T00:00:00Z", "windowEnd": "2026-11-24T00:00:00Z",
+                    "maxCloud": 1, "priority": "重点"}, ensure_ascii=False) + "'")
         r = api_req("/order-intake", method="POST", body=body)
         print(_json.dumps(r, ensure_ascii=False, indent=1))
         if r.get("ok"):
@@ -596,6 +750,17 @@ def main():
 
     elif cmd == "plans":
         out(q("SELECT id, taskId, satName, company, status, overpassTime FROM directPlans ORDER BY id DESC LIMIT 20"))
+
+    elif cmd == "scope" and arg:
+        # 覆盖范围判定（2026-11-16 新增）
+        # 解决「AI 为判断拆不拆，反复查卫星清单自己算」的低效问题：
+        # 一条命令直接返回「单星能否一次覆盖 / 需要拆几条 / 依据是什么」。
+        # 用法: dispatch scope '{"coords":[[lat,lon],...],"obsType":"optical","resolution":1}'
+        try:
+            body = json.loads(arg)
+        except Exception:
+            die("用法: dispatch scope '{\"coords\":[[lat,lon],...],\"obsType\":\"optical\",\"resolution\":1}'")
+        out(api_req("/scope-judge", "POST", body))
 
     elif cmd == "preflight" and arg:
         # 下单前预检（固化历次撞墙经验，秒级返回，不写库）：

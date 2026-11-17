@@ -610,14 +610,17 @@ def main():
     elif cmd == "recalc" and arg:
         # 只重算单个任务候选（不动其他条带，避免整体推倒重来）
         # 用法: dispatch recalc <taskId> ['{"maxCloud":0.5,"resolution":5,"windowEnd":"..."}']
-        parts = arg.split(None, 1)
-        tid = parts[0]
+        # 注意：CLI 顶层只把 sys.argv[2] 给 arg，第二个参数要自己从 argv 取，
+        # 否则 JSON 覆盖参数会被静默丢弃（实测"已按原参数重算"就是这么来的）。
+        tid = arg
         over = {}
-        if len(parts) > 1:
+        extra = sys.argv[3:] if len(sys.argv) > 3 else []
+        if extra:
+            raw = " ".join(extra)
             try:
-                over = json.loads(parts[1])
+                over = json.loads(raw)
             except Exception as e:
-                die(f"覆盖参数必须是合法 JSON：{e}")
+                die(f"覆盖参数必须是合法 JSON：{e}\n传入的是: {raw}")
         r = api_req(f"/tasks/{tid}/recalc", method="POST", body=over)
         pc = r.get("planCheck") or {}
         print(f"任务 {r.get('taskNo')} 重算完成：条带 {r.get('strips')}，通过候选 {r.get('candidates')}，筛除 {r.get('filtered')}")
