@@ -6,7 +6,8 @@
 // 用法：PB_URL/... node scripts/pb_fix_relations.mjs
 const PB_URL = process.env.PB_URL || "http://127.0.0.1:8091";
 const PB_ADMIN = process.env.PB_ADMIN || "admin@sat.local";
-const PB_PASS = process.env.PB_PASS || "SatDispatch2026!";
+const PB_PASS = process.env.PB_PASS;
+if (!PB_PASS) { console.error("缺少环境变量 PB_PASS（PocketBase 管理员口令）"); process.exit(1); }
 
 const REL_FIELDS = [
   { table: "candidates", field: "task", target: "tasks" },

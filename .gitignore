@@ -11,3 +11,20 @@ __pycache__/
 # 部署产物：每次 blade app deploy 自动重新生成（~80MB），
 # 提交进 git 会让 .git 膨胀到数 GB，导致部署打包超时（本次 4.1G / >600s）
 deploy/*.zip
+
+# ── 敏感信息与环境（公开仓库必须排除）──────────────────────────
+.env
+.env.*
+!.env.example
+pb_data/
+data/pb_data/
+*.pem
+*.key
+*.p12
+offline-pkg/
+sat-dispatch-offline-*.tar.gz
+sat-dispatch-offline-*.tar.gz.sha256
+
+# 本地临时/调试产物
+browser-screenshots/
+*.log

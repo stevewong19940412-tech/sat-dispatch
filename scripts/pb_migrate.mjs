@@ -1,7 +1,7 @@
 // ─── PocketBase 迁移工具：旧 SQLite 全表 → PB collections + 数据搬迁 ──────
 // 用法：
 //   PB_URL=http://127.0.0.1:8090 \
-//   PB_ADMIN=admin@sat.local PB_PASS='SatDispatch2026!' \
+//   PB_ADMIN=admin@sat.local PB_PASS='<你的口令>' \
 //   SQLITE_PATH=data/satplanning.db \
 //   node scripts/pb_migrate.mjs
 //
@@ -17,7 +17,8 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PB_URL = process.env.PB_URL || "http://127.0.0.1:8090";
 const PB_ADMIN = process.env.PB_ADMIN || "admin@sat.local";
-const PB_PASS = process.env.PB_PASS || "SatDispatch2026!";
+const PB_PASS = process.env.PB_PASS;
+if (!PB_PASS) { console.error("缺少环境变量 PB_PASS（PocketBase 管理员口令）"); process.exit(1); }
 const SQLITE_PATH = process.env.SQLITE_PATH || join(__dirname, "..", "data", "satplanning.db");
 const BATCH = 200;
 const SKIP_TABLES = new Set(["sqlite_sequence"]);

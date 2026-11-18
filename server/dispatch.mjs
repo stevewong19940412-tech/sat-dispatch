@@ -70,6 +70,16 @@ import { prefetchCloudGrids } from "./cloud_forecast.mjs";
 import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
 import { coverageGrade } from "./coverage_grid.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
+
+// 安全：不在源码中内置默认口令。部署时必须通过 PB_PASS 环境变量提供，
+// 缺失则启动即失败（快速失败），避免弱口令随代码公开泄露。
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`缺少必需的环境变量 ${name}（PocketBase 管理员口令）。请在部署环境设置后再启动。`);
+  }
+  return v;
+}
 import { solarElevationDegFor } from "./solar.mjs";
 
 export const dispatchApi = express.Router();
@@ -728,7 +738,7 @@ dispatchApi.get("/_pbq", async (req, res) => {
 dispatchApi.get("/_pb-schema", async (req, res) => {
   try {
     const PB = process.env.PB_URL || 'http://127.0.0.1:8091';
-    const auth = await fetch(PB + '/api/collections/_superusers/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: process.env.PB_ADMIN || 'admin@sat.local', password: process.env.PB_PASS || 'SatDispatch2026!' }) }).then(r => r.json());
+    const auth = await fetch(PB + '/api/collections/_superusers/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: process.env.PB_ADMIN || 'admin@sat.local', password: requireEnv('PB_PASS') }) }).then(r => r.json());
     const cols = await fetch(PB + '/api/collections', { headers: { Authorization: auth.token } }).then(r => r.json());
     const arr = cols.items || cols;
     const out = {};
@@ -742,7 +752,7 @@ dispatchApi.get("/_pb-schema", async (req, res) => {
 dispatchApi.get("/_pb-schema", async (req, res) => {
   try {
     const PB = process.env.PB_URL || 'http://127.0.0.1:8091';
-    const auth = await fetch(PB + '/api/collections/_superusers/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: process.env.PB_ADMIN || 'admin@sat.local', password: process.env.PB_PASS || 'SatDispatch2026!' }) }).then(r => r.json());
+    const auth = await fetch(PB + '/api/collections/_superusers/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: process.env.PB_ADMIN || 'admin@sat.local', password: requireEnv('PB_PASS') }) }).then(r => r.json());
     const cols = await fetch(PB + '/api/collections', { headers: { Authorization: auth.token } }).then(r => r.json());
     const arr = cols.items || cols;
     const out = {};

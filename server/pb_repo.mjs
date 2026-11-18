@@ -7,7 +7,7 @@
 
 const PB_URL = process.env.PB_URL || "http://127.0.0.1:8091";
 const PB_ADMIN = process.env.PB_ADMIN || "admin@sat.local";
-const PB_PASS = process.env.PB_PASS || "SatDispatch2026!";
+const PB_PASS = requireEnv("PB_PASS");
 
 let _token = null, _tokenExp = 0;
 export async function pbAuth() {
@@ -224,4 +224,14 @@ async function _seqFallbackNext(name) {
     _seqFallback[name] = fb;
   }
   return fb;
+}
+
+// 安全：不在源码中内置默认口令。部署时必须通过 PB_PASS 环境变量提供，
+// 缺失则启动即失败（快速失败），避免弱口令随代码公开泄露。
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`缺少必需的环境变量 ${name}（PocketBase 管理员口令）。请在部署环境设置后再启动。`);
+  }
+  return v;
 }

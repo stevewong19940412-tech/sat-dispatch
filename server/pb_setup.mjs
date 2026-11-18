@@ -11,12 +11,22 @@
 import Database from "better-sqlite3";
 import { join, dirname } from "path";
 import { existsSync } from "fs";
+
+// 安全：不在源码中内置默认口令。部署时必须通过 PB_PASS 环境变量提供，
+// 缺失则启动即失败（快速失败），避免弱口令随代码公开泄露。
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`缺少必需的环境变量 ${name}（PocketBase 管理员口令）。请在部署环境设置后再启动。`);
+  }
+  return v;
+}
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PB_URL = process.env.PB_URL || "http://127.0.0.1:8091";
 const PB_ADMIN = process.env.PB_ADMIN || "admin@sat.local";
-const PB_PASS = process.env.PB_PASS || "SatDispatch2026!";
+const PB_PASS = requireEnv("PB_PASS");
 // 种子库路径：优先 seed 副本（部署容器只有它），本地开发回退到 data/satplanning.db
 const SQLITE_PATH = process.env.SQLITE_PATH || (() => {
   const seed = join(__dirname, "..", "data", "seed-satplanning.db");
