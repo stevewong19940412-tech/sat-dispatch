@@ -28,3 +28,10 @@ sat-dispatch-offline-*.tar.gz.sha256
 # 本地临时/调试产物
 browser-screenshots/
 *.log
+
+# ── 二进制产物（可重新获取，不进版本库）─────────────────────────
+# PocketBase 可执行文件（30MB，从官方 release 下载）
+server/pocketbase
+# better-sqlite3 预编译包与 vendor 快照（pnpm install / rebuild 会重建）
+vendor_node_modules/
+server/vendor_node_modules.tar.gz
