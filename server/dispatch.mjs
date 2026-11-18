@@ -63,7 +63,7 @@ import {
 import { forecastCloudReal } from "./cloud_forecast.mjs";
 import { computeStationPasses, pickUplinkPass } from "./ground_stations.mjs";
 import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload_specs.mjs";
-import { summarizeCoveragePlan, planAreaStrips } from "./strip_planner.mjs";
+import { summarizeCoveragePlan, planAreaStrips, groundTrackAzimuth } from "./strip_planner.mjs";
 import { judgeArea, regionSize, deriveUsableSwath } from "./area_judge.mjs";
 import { validatePlan } from "./plan_validator.mjs";
 import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
@@ -587,6 +587,48 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
         const sw = deriveUsableSwath(satRows, t.obsType, t.resolution);
         if (sw?.swathKm) swathKm = sw.swathKm;
       } catch {}
+
+      // ── 已是条带的任务，不再做区域规划（2026-11-18 修复）────────────────
+      // 问题：order-intake 已把大区域拆成 N 个条带任务（每个任务 parentArea+stripIdx），
+      //   但详情页又把这条带当作"新区域"重新规划 → 因条带南北长（如 61km）、
+      //   旋转到轨道方向后横跨超幅宽，被再切成 2 条，与任务名「第14带（共14带）」矛盾。
+      //   实测所有条带任务都显示 2 条带。
+      // 修法：识别到任务是已拆条带（有 parentArea 且 stripIdx>0）时，
+      //   直接按"1 条带"返回该条带自身的几何，不再重新切分。
+      const isPreSplitStrip = !!(t.parentArea && Number(t.stripIdx) > 0);
+      if (isPreSplitStrip) {
+        const lats = t.geom.coords.map(c => c[0]), lons = t.geom.coords.map(c => c[1]);
+        const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+        const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+        const cLat = (minLat + maxLat) / 2, cLon = (minLon + maxLon) / 2;
+        const widthKm = (maxLon - minLon) * 111.32 * Math.cos(cLat * Math.PI / 180);
+        const heightKm = (maxLat - minLat) * 110.57;
+        let azDeg = 0;
+        try { azDeg = +(groundTrackAzimuth(97.9, cLat) * 180 / Math.PI).toFixed(2); } catch {}
+        t.areaPlan = {
+          alreadySplit: true,
+          scale: '已拆条带',
+          strategy: `本任务已是「${t.parentArea}」的第 ${t.stripIdx}/${t.stripCount} 条带，无需再次拆分`,
+          stripCount: 1,
+          direction: { azimuthDeg: azDeg, note: '沿星下点轨迹' },
+          areaKm2: +(widthKm * heightKm).toFixed(1),
+          bboxKm: { width: +widthKm.toFixed(1), height: +heightKm.toFixed(1) },
+          swathKm,
+          overlapPct: null,
+          strips: [{
+            idx: Number(t.stripIdx),
+            center: [+cLat.toFixed(5), +cLon.toFixed(5)],
+            start: [+minLat.toFixed(5), +minLon.toFixed(5)],
+            end: [+maxLat.toFixed(5), +maxLon.toFixed(5)],
+            widthKm: +Math.min(widthKm, heightKm).toFixed(2),
+            lengthKm: +Math.max(widthKm, heightKm).toFixed(2),
+            areaKm2: +(widthKm * heightKm).toFixed(1),
+            azimuthDeg: azDeg,
+          }],
+          note: '该任务由区域拆单产生，本身即为一条带；详情展示的就是这条带的实际覆盖范围',
+        };
+        if (!t.createdAt) t.createdAt = "0000-00-00 00:00:00";
+      } else {
       const ap = planTaskArea({ geomType: t.geomType, geom: JSON.stringify(t.geom) }, swathKm);
       if (ap) t.areaPlan = {
         scale: ap.scaleLabel, strategy: ap.policy.note, stripCount: ap.stats.stripCount,
@@ -605,6 +647,7 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
           areaKm2: st.areaKm2, azimuthDeg: st.azimuthDeg,
         })),
       };
+      }
     } catch (e) { console.error('[task-detail] 区域规划计算失败:', e.message); }
   }
   if (!t.createdAt) t.createdAt = "0000-00-00 00:00:00";
