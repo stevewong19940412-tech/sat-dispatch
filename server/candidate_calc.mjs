@@ -552,12 +552,18 @@ export function forecastCloud(lat, lon, when, leadDays) {
 
 // 几何修正（4.3-4）：侧摆穿透 + 光照
 export function cloudEffective(cloud, slewDeg, sunElevDeg) {
+  // 2026-11-18：cloud 可能为 null（超出72h真实预报期，用户要求不筛云量）。
+  // 原实现 `1 - Math.pow(1 - null, ...)` = 1 - 1 = 0 → ceff=0 → availability=100%，
+  // 把"云量未知"算成"完全可用"，严重误导排序。
+  // 现在：cloud 未知时按中性值 0.5 估可用度，并标记 cloudKnown=false 供上层标注。
+  const cloudKnown = cloud != null && Number.isFinite(cloud);
+  const cloudVal = cloudKnown ? cloud : 0.5;   // 中性假设：不因未知而奖励或惩罚
   const cosSlew = Math.max(0.2, Math.cos(slewDeg * Math.PI / 180));
-  const ceff = 1 - Math.pow(1 - cloud, 1 / cosSlew);
+  const ceff = 1 - Math.pow(1 - cloudVal, 1 / cosSlew);
   // 光照因子：太阳高度角 10°→0.8, 30°+→1.0
   const fsun = sunElevDeg >= 30 ? 1.0 : Math.max(0.3, 0.3 + (sunElevDeg / 30) * 0.7);
   const availability = 100 * (1 - ceff) * fsun;
-  return { ceff, fsun, availability: Math.round(availability * 10) / 10 };
+  return { ceff, fsun, cloudKnown, availability: Math.round(availability * 10) / 10 };
 }
 
 // ─── 约束筛选（4.3-3）：规则引擎，逐条独立判定 ──────────────────────────
