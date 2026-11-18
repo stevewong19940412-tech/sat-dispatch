@@ -181,6 +181,10 @@ const REQUIRED_FIELDS = {
     { name: 'stripCount', type: 'number' },   // 该任务条带总数
     { name: 'coverPct', type: 'number' },     // 条带覆盖率
     { name: 'cloudFc', type: 'number' },      // 预报云量
+    // 云量是否有效（1=有效可筛 / 0=超出72h预报期，未参与筛选）。
+    // 单独存标记而不靠 cloudFc 的 null：PB number 字段不支持 null，
+    // 直接写 null 会被存成 0（伪装成"晴空"），严重误导。
+    { name: 'cloudValid', type: 'number' },
     { name: 'execPlan', type: 'text' },       // 执行步骤摘要（文本）
   ],
   tasks: [

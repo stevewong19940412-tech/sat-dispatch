@@ -667,8 +667,16 @@ function TasksTab({ tasks, selected, openTask, runCandidates, doDispatch, busy, 
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5 }}>{r.overpassTime?.slice(5, 16)}</td>
                       <td style={{ fontFamily: 'var(--font-mono)' }}>{r.slewDeg?.toFixed(0)}°</td>
-                      <td style={{ fontFamily: 'var(--font-mono)' }} title={r.cloudSource === 'real' ? '真实气象预报 (open-meteo)' : '内置模拟气象场（超出72h预报窗）'}>
-                        {(r.cloudFc * 100).toFixed(0)}%{r.cloudSource === 'real' ? ' 🛰' : ''}
+                      <td style={{ fontFamily: 'var(--font-mono)' }}
+                        title={
+                          r.cloudSource === 'real' ? '真实气象预报（open-meteo，72h内）'
+                          : (r.cloudValid === 0 || r.cloudFc == null) ? '超出72h真实预报期，系统不做云量筛选（临期72h内需复核）'
+                          : '内置模拟气象场（超出72h预报窗）'
+                        }>
+                        {(r.cloudValid === 0 || r.cloudFc == null)
+                          ? <span style={{ color: 'var(--warning, #e6a23c)' }} title="云量未知：超出72h预报期，未参与筛选">未知</span>
+                          : `${(r.cloudFc * 100).toFixed(0)}%`}
+                        {r.cloudSource === 'real' ? ' 🛰' : ''}
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)', color: (r.sunElDeg ?? 40) >= 10 ? 'var(--text-dim)' : 'var(--danger)' }}
                         title={(r.sunElDeg ?? 40) >= 10 ? '光照满足（≥10°）' : '光照不足'}>

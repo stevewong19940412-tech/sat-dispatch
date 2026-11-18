@@ -585,7 +585,10 @@ export function applyConstraints(candidate, task, sat, cap) {
     if (leadH > task.timelinessHours) reasons.push(`时效不满足：过顶在${leadH.toFixed(0)}h后，要求${task.timelinessHours}h内`);
   }
   // 云量初判
-  if (sat.subCategory !== 'sar' && candidate.cloudFc > task.maxCloud) {
+  // 2026-11-18 用户要求"三天外不做云量筛选"：
+  // cloudFc 为 null 表示该时刻超出真实预报有效期（或预报不可用），
+  // 此时不拿模拟值硬筛，只放行并标注"云量未知"，由值班在临期 72h 内复核。
+  if (sat.subCategory !== 'sar' && candidate.cloudFc != null && candidate.cloudFc > task.maxCloud) {
     reasons.push(`云量超限：预报${(candidate.cloudFc*100).toFixed(0)}% > 任务上限${(task.maxCloud*100).toFixed(0)}%`);
   }
   // ── 条带覆盖率门槛（2026-11-16 用户要求）──────────────────────────────

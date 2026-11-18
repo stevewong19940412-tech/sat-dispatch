@@ -66,6 +66,7 @@ import { solveImagingParams, solveUplinkBudget, getPayloadSpec } from "./payload
 import { summarizeCoveragePlan, planAreaStrips, groundTrackAzimuth } from "./strip_planner.mjs";
 import { judgeArea, regionSize, deriveUsableSwath } from "./area_judge.mjs";
 import { validatePlan } from "./plan_validator.mjs";
+import { prefetchCloudGrids } from "./cloud_forecast.mjs";
 import { dispatchAcrossSatellites, shouldSplitOrder } from "./multi_dispatch.mjs";
 import { coverageGrade } from "./coverage_grid.mjs";
 import { rankTaskPB } from "./priority_calc.mjs";
@@ -661,6 +662,7 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
       satName: c.satName, company: c.company,
       wStart: c.windowStart, wEnd: c.windowEnd, overpassTime: c.overpassTime,
       slewDeg: c.slewDeg, availability: c.availability, cloudFc: c.cloudFc, cloudSource: c.cloudSource,
+      cloudValid: c.cloudValid ?? 1,   // 0=超出72h预报期，云量未知未参与筛选
       orbitGrade: c.orbitGrade, stripIdx: c.stripIdx, stripCount: c.stripCount, minDistKm: c.minDistKm,
       // 覆盖率必须返回：派单排序最先看 stripCoverage（0=几何上拍不到该条带），
       // 前端不显示它就会产生"排名第一却没派它"的困惑（PO-20261116-205）
@@ -904,6 +906,21 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
   const totalCandidatesHardCap = TOTAL_CAP * 3; // 含被筛除行的总行数上限
   let truncatedEarly = false;
 
+  // ── 云量预取（2026-11-18 性能优化，方案1+2）────────────────────────────
+  // 问题：原实现在最内层循环 `await forecastCloudReal(...)`，
+  //   131 星 × N 带 × 3 窗口 = 上千次串行外部 API 等待，
+  //   大区域任务要几十秒~数分钟（CPU 基本空闲，纯 I/O 等待）。
+  // 改法：循环开始前按「条带坐标去重」并发预取所有云量网格（默认 8 并发），
+  //   循环内全部命中内存缓存，耗时从"网格数 × 单次延迟"降到"网格数 ÷ 并发 × 单次延迟"。
+  // 另：3 天外的点不预取（用户要求"三天外不做云量筛选"，不请求也就不会误杀）。
+  let cloudPrefetch = null;
+  try {
+    const needPts = strips.map(st => ({ lat: st.lat, lon: st.lon, when: task.windowStart }));
+    cloudPrefetch = await prefetchCloudGrids(needPts, 8);
+  } catch (e) {
+    console.error('[candidates] 云量预取失败（不影响计算，逐点回退）:', e.message);
+  }
+
   for (const sat of scope) {
     const cap = getCapability(sat);
     const company = sat.operator || sat.country;
@@ -941,7 +958,15 @@ dispatchApi.post("/tasks/:id/candidates", async (req, res) => {
           stripIdx: strip.idx, stripCount: strip.count, satNoradId: sat.noradId, satName: sat.name, company,
           windowStart: new Date(w.start).toISOString(), windowEnd: new Date(w.end).toISOString(),
           overpassTime: overpass.toISOString(), slewDeg: Math.round(w.slewDeg * 10) / 10,
-          availability: Math.round(availability * 10) / 10, cloudFc: Math.round(cloud * 1000) / 1000,
+          // cloud 可能为 null（3天外超出真实预报期，用户要求此时不筛云量）。
+          // 注意不能用 Math.round(null*1000)/1000 —— 那会把 null 变成 0，
+          // 存成"云量 0% 晴空"，与"云量未知"完全相反，会误导用户。
+          // 这里保留 null（PB number 字段可空），前端显示为"未知（临期复核）"。
+          availability: Math.round(availability * 10) / 10,
+          // PB number 字段不支持 null，写 null 会被存成 0（伪装晴空）。
+          // 所以：无效时 cloudFc 记 0，同时 cloudValid=0 表示"不要相信这个值"。
+          cloudFc: (cloud == null ? 0 : Math.round(cloud * 1000) / 1000),
+          cloudValid: (cloud == null ? 0 : 1),
           orbitGrade: '高', filtered: pass ? 0 : 1, filterReason: pass ? "" : reasons.join('；'),
           validRes: Math.round(validRes * 100) / 100, cloudSource: cloudSrc,
           sunElDeg: Math.round(solarElevationDegFor(strip.lat, strip.lon, overpass) * 10) / 10,
