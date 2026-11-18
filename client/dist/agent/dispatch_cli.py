@@ -149,7 +149,10 @@ def q(sql, args=()):
 # ─── PocketBase 直查通道（v7）───────────────────────────────────────────────
 PB_URL = os.environ.get("DISPATCH_PB_URL", "http://127.0.0.1:8091")
 PB_ADMIN = os.environ.get("DISPATCH_PB_ADMIN", "admin@sat.local")
-PB_PASS = os.environ.get("DISPATCH_PB_PASS", "SatDispatch2026!")
+# 安全：不内置默认口令（公开仓库会泄露）。留空表示"不直连 PB"，
+# CLI 会走应用侧 /dispatch/_pbq 只读代理（推荐路径），不依赖该项。
+# 只有显式设置 DISPATCH_PB_PASS 且指定 DISPATCH_PB_URL 时才直连。
+PB_PASS = os.environ.get("DISPATCH_PB_PASS", "")
 _pb_token = None
 
 def _pb_auth():
