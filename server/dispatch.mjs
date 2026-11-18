@@ -686,9 +686,18 @@ dispatchApi.post("/_pb-setup", async (req, res) => {
   try {
     const { runSetup } = await import('./pb_setup.mjs');
     const r = await runSetup();
+    // 字段自愈在 orbit_heal.mjs（不在 pb_setup），原接口只跑 runSetup，
+    // 新增字段永远补不上（cloudValid 就是这么丢的）。这里一并执行。
+    let heal = null;
+    try {
+      const { healCollectionFields } = await import('./orbit_heal.mjs');
+      heal = await healCollectionFields();
+    } catch (e) {
+      heal = { error: e.message.slice(0, 200) };
+    }
     // runSetup 的返回结构在不同版本不一致（曾只有 {ok:true}），
     // 直接取 r.summary 会抛 TypeError 并返回 500，让调用方误以为自愈失败。
-    res.json({ ok: true, summary: r?.summary ?? r ?? {} });
+    res.json({ ok: true, summary: r?.summary ?? r ?? {}, fieldHeal: heal });
   } catch (e) { res.status(500).json({ error: e.message.slice(0, 300) }); }
 });
 dispatchApi.get("/_pb-peek", async (req, res) => {
