@@ -166,6 +166,10 @@ export async function healSatelliteMeta() {
 const REQUIRED_FIELDS = {
   candidates: [
     { name: 'stripCoverage', type: 'number' },
+    // 云量是否有效（1=真实预报可筛 / 0=超出72h预报期或预报不可用，未参与筛选）。
+    // 不靠 cloudFc 的 null 表达：PB number 字段不支持 null，写 null 会被存成 0，
+    // 与"0% 晴空"混淆、严重误导。2026-11-18 用户要求"三天外不做云量筛选"新增。
+    { name: 'cloudValid', type: 'number' },
   ],
   orders: [
     // 订单执行明细（2026-11-16 用户要求「点开订单要能看到时间窗和怎么执行」）
