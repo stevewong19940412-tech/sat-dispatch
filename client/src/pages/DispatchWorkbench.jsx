@@ -155,11 +155,27 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
     try {
       if (action === 'generate') {
         const r = await api(`/dispatch/plans/${planId}/generate`, { method: 'POST' });
-        const errMsg = (r.validation.errors ?? []).map(e => typeof e === 'object' ? (e.detail?.conclusion || e.msg) : e).join('；');
-        setMsg({ ok: r.validation.pass, text: r.validation.pass
-          ? `✅ 参数包已生成并通过校验（${r.commands.length} 条动作，总时长 ${r.validation.totalDuration}s）——下方方案卡片状态已更新为「待核验下发」，可点「查看直控参数包」`
-          : `❌ 校验驳回：${errMsg}` });
+        // 健壮性：原写法裸访问 r.validation.pass，接口返回非预期结构时抛 TypeError
+        // 被外层 catch 吞掉 → 表现为"点了没反应、不跳转"。全部改用可选链。
+        const v = r?.validation ?? {};
+        const passed = !!v.pass;
+        const errList = Array.isArray(v.errors) ? v.errors : [];
+        const errMsg = errList
+          .map(e => (typeof e === 'object' ? (e?.detail?.conclusion || e?.msg) : e))
+          .filter(Boolean).join('；') || '（未返回具体原因）';
+        const nCmd = Array.isArray(r?.commands) ? r.commands.length : 0;
+        setMsg({
+          ok: passed,
+          text: passed
+            ? `✅ 参数包已生成并通过校验（${nCmd} 条动作，总时长 ${v.totalDuration ?? '-'}s），正在为你打开参数包…`
+            : `⚠️ 参数包已生成但校验未通过（${nCmd} 条动作）：${errMsg}。参数包详情已打开，可在其中查看问题并选择「换一颗候选卫星解算」`,
+        });
         await load();
+        // 无论通过与否都打开参数包抽屉：
+        // 通过 → 直接看指令序列/测控弧段；未通过 → 就地看驳回原因并换星
+        // （用户反馈"生成后不跳转"，原来要再去找"查看直控参数包"按钮）
+        setPackDrawerId(planId);
+        setTab('plans');
       } else if (action === 'reassign') {
         const r = await api(`/dispatch/plans/${planId}/reassign`, { method: 'POST', body: JSON.stringify({ force: false }) });
         setMsg({ ok: true, text: `🔄 已换星：${r.from} → ${r.to}（候选顺位 ${r.rankPos}/${r.totalRanked}${r.imgWinCovered ? '，幅宽可覆盖' : '，注意：该候选幅宽也罩不住目标'}），正在自动重新解算…` });
