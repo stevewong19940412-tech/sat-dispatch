@@ -35,7 +35,10 @@ export function createScene(container) {
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setSize(w, h);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // 2026-11-18 性能优化（INP 3056ms）：原 devicePixelRatio 上限 2，
+  // 高分屏上实际渲染像素是 1080p 的 4 倍，GPU 与主线程双重压力。
+  // 降到 1.5 → 像素量约 2.25 倍，画质肉眼几乎无差，渲染负担减少约 44%。
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
@@ -69,7 +72,8 @@ export function createScene(container) {
 
   // ─── 地球 ───
   const loader = new THREE.TextureLoader();
-  const earthGeo = new THREE.SphereGeometry(GLOBE_R, 96, 96);
+  // 球体分段 96→64：面片 9216→4096（少 55%），这个屏幕尺寸下看不出棱角
+  const earthGeo = new THREE.SphereGeometry(GLOBE_R, 64, 64);
   const earthMat = new THREE.MeshPhongMaterial({
     map: loader.load(EARTH_DAY_URL),
     specular: new THREE.Color(0x111820),
@@ -115,16 +119,40 @@ export function createScene(container) {
   scene.add(satGroup, trackGroup, aoiGroup, layerGroup);
 
   // ─── 渲染循环 ───
+  // ─── 渲染循环（2026-11-18 性能优化）────────────────────────────────
+  // 问题：原来每帧全量渲染、无帧率上限。144Hz 屏上一秒渲染 144 次，
+  //   主线程持续被占，用户点击要排在渲染任务后面 → INP 3056ms（"点一下等 3 秒"）。
+  // 优化（用户选定方案 B）：
+  //   ① 限制到 45fps —— 三维地球是展示型场景，45fps 转动足够顺滑，
+  //      但比无上限（60~144fps）少渲染 30%~70%，主线程大幅释放；
+  //   ② 暂停时**真正停止 rAF 循环**，而不是空转跳过（工作台打开时三维是隐藏的，
+  //      继续跑 rAF 纯属浪费）；
+  //   ③ 页面不可见（切标签页）时也自动停循环，回来再起。
   let animFrame = 0;
   let paused = false;
-  const clock = new THREE.Clock();
-  const renderLoop = () => {
+  let lastRenderTs = 0;
+  const FRAME_INTERVAL = 1000 / 45;   // 45fps 目标
+  const renderLoop = (ts) => {
     animFrame = requestAnimationFrame(renderLoop);
-    if (paused) return; // 暂停时保留循环但跳过渲染，恢复即续
+    if (paused) return;
+    // 帧率闸门：距上次渲染不足一个间隔就跳过（浏览器可能以 60/120/144Hz 回调）
+    if (ts && lastRenderTs && ts - lastRenderTs < FRAME_INTERVAL - 0.5) return;
+    lastRenderTs = ts || performance.now();
     controls.update();
     renderer.render(scene, camera);
   };
-  renderLoop();
+  const startLoop = () => {
+    if (animFrame) return;
+    lastRenderTs = 0;
+    animFrame = requestAnimationFrame(renderLoop);
+  };
+  const stopLoop = () => {
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = 0; }
+  };
+  startLoop();
+  // 切到后台标签页时停循环（省 CPU/电量），回来恢复
+  const onVis = () => { if (document.visibilityState === 'hidden') stopLoop(); else if (!paused) startLoop(); };
+  document.addEventListener('visibilitychange', onVis);
 
   // ─── 交互拾取 ───
   const raycaster = new THREE.Raycaster();
@@ -171,7 +199,8 @@ export function createScene(container) {
   resizeObserver.observe(container);
 
   function dispose() {
-    cancelAnimationFrame(animFrame);
+    stopLoop();
+    document.removeEventListener('visibilitychange', onVis);
     resizeObserver.disconnect();
     controls.dispose();
     renderer.dispose();
@@ -185,8 +214,9 @@ export function createScene(container) {
     satGroup, trackGroup, aoiGroup, layerGroup,
     pick, pickGlobe, resize, dispose,
     latLonAltToVec,
-    pause: () => { paused = true; },
-    resume: () => { paused = false; },
+    // 暂停时彻底停掉 rAF 循环（工作台打开时三维不可见，空转纯浪费主线程）
+    pause: () => { paused = true; stopLoop(); },
+    resume: () => { paused = false; startLoop(); },
   };
 }
 

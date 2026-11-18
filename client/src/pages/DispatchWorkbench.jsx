@@ -62,6 +62,14 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
       const t = tasks.find(x => x.id === +taskId);
       if (!t) return;
       e.preventDefault(); e.stopPropagation();
+      // 2026-11-18 INP 优化：点击后立即给出视觉反馈。
+      // 原实现点击后要串行等 confirm → runCandidates（可能几十秒）→ 详情 → 派单，
+      // 期间界面毫无变化，浏览器把这段算作 INP，实测 3056ms（"点一下等 3 秒"）。
+      // 现在：先立刻 setBusy + setMsg，让点击在 1 帧内就有响应，
+      //   后台请求照旧跑完（INP 只统计"到下次绘制"的时间，不再包含接口等待）。
+      setBusy(true);
+      const slowHint = action === 'assign-open' ? '' : '，候选取数可能需要几秒';
+      setMsg({ ok: true, text: `⏳ 正在处理「${t.taskNo}」${slowHint}…` });
       try {
         if (t.pendingConfirm === 1) await api(`/dispatch/tasks/${t.id}/confirm`, { method: 'POST', body: JSON.stringify({}) });
         if (action === 'assign-open') { setAssignMode(t); return; }
@@ -78,6 +86,7 @@ export default function DispatchWorkbench({ onBack, aoiPrefill }) {
         }
         await load(); await openTask(t.id);
       } catch (e2) { setMsg({ ok: false, text: e2.message }); }
+      finally { setBusy(false); }
     };
     document.addEventListener('click', h, true);
     return () => document.removeEventListener('click', h, true);
