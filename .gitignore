@@ -35,3 +35,33 @@ server/pocketbase
 # better-sqlite3 预编译包与 vendor 快照（pnpm install / rebuild 会重建）
 vendor_node_modules/
 server/vendor_node_modules.tar.gz
+
+# ── 非代码文件不进版本库（用户要求：仓库只留代码）───────────────
+# 文档 / 汇报材料
+docs/
+*.pptx
+*.ppt
+*.docx
+*.doc
+*.pdf
+# 截图与图片（运行时会用到的贴图除外）
+*.png
+*.jpg
+*.jpeg
+!client/public/textures/*.jpg
+# 调试/一次性脚本
+compare*.mjs
+diagnose*.mjs
+paste_*
+# Python 缓存
+__pycache__/
+*.pyc
+# 抓取的原始数据（体积大且可重新获取，卫星基础数据保留）
+data/webfetch_raw/
+data/wf_*.json
+data/all_candidates.json
+data/china_candidates.json
+data/intl_candidates.json
+data/legacy_remote_sensing.json
+data/missing_norads.json
+data/webfetch_log.md
