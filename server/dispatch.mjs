@@ -662,7 +662,9 @@ dispatchApi.get("/tasks/:id", async (req, res) => {
       satName: c.satName, company: c.company,
       wStart: c.windowStart, wEnd: c.windowEnd, overpassTime: c.overpassTime,
       slewDeg: c.slewDeg, availability: c.availability, cloudFc: c.cloudFc, cloudSource: c.cloudSource,
-      cloudValid: c.cloudValid ?? 1,   // 0=超出72h预报期，云量未知未参与筛选
+      // 0=云量未知（超出72h预报期或预报不可用），未参与筛选。
+      // 兜底用 cloudSource 反推而不是写死 1：老数据 cloudValid 为空时会误报"有效"。
+      cloudValid: c.cloudValid ?? (c.cloudSource === 'real' ? 1 : 0),
       orbitGrade: c.orbitGrade, stripIdx: c.stripIdx, stripCount: c.stripCount, minDistKm: c.minDistKm,
       // 覆盖率必须返回：派单排序最先看 stripCoverage（0=几何上拍不到该条带），
       // 前端不显示它就会产生"排名第一却没派它"的困惑（PO-20261116-205）
@@ -684,7 +686,9 @@ dispatchApi.post("/_pb-setup", async (req, res) => {
   try {
     const { runSetup } = await import('./pb_setup.mjs');
     const r = await runSetup();
-    res.json({ ok: true, summary: r.summary });
+    // runSetup 的返回结构在不同版本不一致（曾只有 {ok:true}），
+    // 直接取 r.summary 会抛 TypeError 并返回 500，让调用方误以为自愈失败。
+    res.json({ ok: true, summary: r?.summary ?? r ?? {} });
   } catch (e) { res.status(500).json({ error: e.message.slice(0, 300) }); }
 });
 dispatchApi.get("/_pb-peek", async (req, res) => {
