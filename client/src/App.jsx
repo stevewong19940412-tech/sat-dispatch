@@ -23,6 +23,8 @@ export default function App() {
 
   // ─── 状态 ───
   const [sceneReady, setSceneReady] = useState(false);
+  // 三维初始化失败原因（WebGL 不可用、容器尺寸异常等）——失败时页面上明确提示，不静默白屏
+  const [sceneError, setSceneError] = useState(null);
   const [categories, setCategories] = useState([]);
   const [enabledCats, setEnabledCats] = useState(new Set(Object.keys(CATEGORY_META)));
   const [positions, setPositions] = useState([]);
@@ -69,20 +71,59 @@ export default function App() {
   // ─── 场景初始化 ───
   useEffect(() => {
     if (!containerRef.current) return;
-    // 三维场景初始化让出主线程：UI 骨架先渲染可交互，地球在下一帧就绪（对齐工作台"列表先行"策略）
+    // 三维场景初始化让出主线程：UI 骨架先渲染可交互，地球在下一帧就绪。
+    //
+    // 2026-11-18 稳定性加固（地球/卫星间歇性不显示的老问题）：
+    // 旧实现 `requestAnimationFrame(() => setTimeout(init, 0))` 有致命依赖——
+    //   requestAnimationFrame 只在页面**可见**时触发。后台标签页打开、
+    //   或被平台 iframe 包住且被判不可见时，它永不执行 → init() 不跑 → 地球永远空白。
+    //   这解释了"间歇性复现、平台升级后更容易触发"。
+    // 新实现三重兜底：
+    //   ① 不再依赖 rAF，直接 setTimeout(0) 让出主线程；
+    //   ② 容器尺寸为 0（布局未完成）时，用 ResizeObserver 等到有尺寸再建，
+    //      避免创建 0×0 画布导致画面全空；
+    //   ③ 创建失败（WebGL 不可用等）时记录原因并在页面明确提示，不静默白屏。
     let cancelled = false;
+    let started = false;
+    let sizeObserver = null;
     const init = () => {
-      if (cancelled) return;
-      const s3d = createScene(containerRef.current);
-      scene3dRef.current = s3d;
-      satLayerRef.current = new SatelliteLayer(s3d);
-      trackLayerRef.current = new TrackLayer(s3d);
-      aoiLayerRef.current = new AoiLayer(s3d);
-      envLayerRef.current = new EnvLayer(s3d);
-      satLayerRef.current.setGroupColors(groupColors);
-      setSceneReady(true);
+      if (cancelled || started) return;
+      const el = containerRef.current;
+      if (!el) return;
+      // 兜底②：尺寸未就绪就先等，避免 0×0
+      if (el.clientWidth < 2 || el.clientHeight < 2) {
+        if (!sizeObserver && typeof ResizeObserver !== 'undefined') {
+          sizeObserver = new ResizeObserver(() => {
+            if (containerRef.current && containerRef.current.clientWidth >= 2 && containerRef.current.clientHeight >= 2) {
+              sizeObserver.disconnect(); sizeObserver = null;
+              init();
+            }
+          });
+          sizeObserver.observe(el);
+        }
+        return;
+      }
+      started = true;
+      try {
+        const s3d = createScene(el);
+        scene3dRef.current = s3d;
+        satLayerRef.current = new SatelliteLayer(s3d);
+        trackLayerRef.current = new TrackLayer(s3d);
+        aoiLayerRef.current = new AoiLayer(s3d);
+        envLayerRef.current = new EnvLayer(s3d);
+        satLayerRef.current.setGroupColors(groupColors);
+        setSceneReady(true);
+      } catch (e) {
+        // 兜底③：明确暴露失败原因，而不是让用户面对一块空白
+        console.error('[scene3d] 三维场景初始化失败:', e);
+        setSceneError(e?.message || String(e));
+      }
     };
-    const raf = requestAnimationFrame(() => setTimeout(init, 0));
+    // 兜底①：不依赖 requestAnimationFrame（后台标签页不触发）
+    const timer = setTimeout(init, 0);
+    // 页面从后台切回前台时再补一次（覆盖"后台打开"的场景）
+    const onVisible = () => { if (!started && document.visibilityState === 'visible') init(); };
+    document.addEventListener('visibilitychange', onVisible);
     // 悬停拾取（节流；场景就绪前静默跳过）
     let lastMove = 0;
     const onMove = (e) => {
@@ -96,7 +137,9 @@ export default function App() {
     container.addEventListener("mousemove", onMove);
     return () => {
       cancelled = true;
-      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+      if (sizeObserver) { sizeObserver.disconnect(); sizeObserver = null; }
+      document.removeEventListener('visibilitychange', onVisible);
       container.removeEventListener("mousemove", onMove);
       scene3dRef.current?.dispose?.();
     };
@@ -255,6 +298,25 @@ export default function App() {
     <>
       {/* 三维容器 */}
       <div ref={containerRef} style={{ position: "fixed", inset: 0, cursor: aoiMode ? "crosshair" : "default" }} />
+      {sceneError && (
+        <div style={{
+          position: "fixed", left: "50%", top: "50%", transform: "translate(-50%,-50%)",
+          zIndex: 30, maxWidth: 460, padding: "18px 22px", borderRadius: 10,
+          background: "rgba(30,16,16,.94)", border: "1px solid #a33", color: "#f5d5d5",
+          fontSize: 13, lineHeight: 1.7, textAlign: "left",
+        }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8, color: "#ff9d9d" }}>
+            ⚠️ 三维地球加载失败
+          </div>
+          <div style={{ marginBottom: 10, wordBreak: "break-all", color: "#e8b4b4" }}>{sceneError}</div>
+          <div style={{ color: "#c9a9a9", fontSize: 12 }}>
+            常见原因：浏览器禁用了硬件加速 / WebGL 不可用 / 显卡驱动异常。<br />
+            可在浏览器设置中开启「使用图形加速」后刷新；数据面板部分不受影响，仍可正常使用。
+          </div>
+          <button className="btn secondary" style={{ marginTop: 12, padding: "3px 14px", fontSize: 12 }}
+            onClick={() => location.reload()}>重新加载</button>
+        </div>
+      )}
 
       {/* 顶栏 */}
       <div className="topbar">
